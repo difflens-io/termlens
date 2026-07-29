@@ -8,12 +8,13 @@ This roadmap tracks product-level optimizations that affect TermLens architectur
 
 Status: implemented in the current main branch.
 
-Mobile and tablet devices often lack terminal-friendly keys on the system keyboard. Soft keyboards can also cover the terminal viewport. TermLens addresses this with a mobile terminal toolbar and viewport-aware layout.
+Mobile and tablet devices often lack terminal-friendly keys on the system keyboard. Soft keyboards can also cover the terminal viewport. TermLens addresses this with a RustDesk-style mobile terminal toolbar and viewport-aware layout.
 
 Implemented improvements:
 
 - 📱 Mobile-only terminal helper toolbar.
-- ⌨️ Quick keys for `Esc`, `Tab`, `Enter`, `Backspace`, `Delete`, arrow keys, `Home`, `End`, `PgUp`, `PgDn`, and common `Ctrl` combinations.
+- ⌨️ One-shot `Ctrl`, `Alt`, and `Shift` modifier keys that apply to the next helper key or system-keyboard input.
+- 🎛️ Quick keys for `Esc`, `Tab`, `Enter`, `Backspace`, `Delete`, arrow keys, `Home`, `End`, `PgUp`, `PgDn`, `F1`-`F12`, and common `Ctrl` combinations.
 - 🔣 Quick symbols for common shell input such as `|`, `~`, `/`, `-`, and `_`.
 - 👆 Pointer handling that keeps terminal focus while tapping helper keys.
 - 📐 `visualViewport`-aware terminal sizing to reduce soft-keyboard overlap.

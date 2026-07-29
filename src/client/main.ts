@@ -10,6 +10,7 @@ let activeTerminalInput: ((data: string) => void) | null = null;
 let activeTerminalFocus: (() => void) | null = null;
 let activeTerminalBlur: (() => void) | null = null;
 let terminalViewportCleanup: (() => void) | null = null;
+const terminalModifierState = new Set<TerminalModifier>();
 
 if (!app) throw new Error('Missing #app root');
 
@@ -39,17 +40,36 @@ interface TerminalKeyAction {
   data: string;
   title: string;
   wide?: boolean;
+  useModifiers?: boolean;
 }
 
+type TerminalModifier = 'ctrl' | 'alt' | 'shift';
+
+interface TerminalModifierAction {
+  id: TerminalModifier;
+  label: string;
+  title: string;
+}
+
+const TERMINAL_MODIFIER_ACTIONS: TerminalModifierAction[] = [
+  { id: 'ctrl', label: 'Ctrl', title: '下一个按键使用 Ctrl' },
+  { id: 'alt', label: 'Alt', title: '下一个按键使用 Alt/Meta' },
+  { id: 'shift', label: 'Shift', title: '下一个按键使用 Shift' }
+];
+
 const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
+  { id: 'ctrl-alt-del', label: 'Ctrl+Alt+Del', data: '\x1b[3;7~', title: 'Ctrl+Alt+Del', wide: true, useModifiers: false },
   { id: 'esc', label: 'Esc', data: '\x1b', title: 'Escape' },
   { id: 'tab', label: 'Tab', data: '\t', title: 'Tab' },
-  { id: 'ctrl-a', label: 'Ctrl A', data: '\x01', title: 'Ctrl+A' },
-  { id: 'ctrl-c', label: 'Ctrl C', data: '\x03', title: 'Ctrl+C' },
-  { id: 'ctrl-d', label: 'Ctrl D', data: '\x04', title: 'Ctrl+D' },
-  { id: 'ctrl-e', label: 'Ctrl E', data: '\x05', title: 'Ctrl+E' },
-  { id: 'ctrl-l', label: 'Ctrl L', data: '\x0c', title: 'Ctrl+L' },
-  { id: 'ctrl-z', label: 'Ctrl Z', data: '\x1a', title: 'Ctrl+Z' },
+  { id: 'ctrl-a', label: 'Ctrl+A', data: '\x01', title: 'Ctrl+A', useModifiers: false },
+  { id: 'ctrl-c', label: 'Ctrl+C', data: '\x03', title: 'Ctrl+C', useModifiers: false },
+  { id: 'ctrl-d', label: 'Ctrl+D', data: '\x04', title: 'Ctrl+D', useModifiers: false },
+  { id: 'ctrl-e', label: 'Ctrl+E', data: '\x05', title: 'Ctrl+E', useModifiers: false },
+  { id: 'ctrl-l', label: 'Ctrl+L', data: '\x0c', title: 'Ctrl+L', useModifiers: false },
+  { id: 'ctrl-r', label: 'Ctrl+R', data: '\x12', title: 'Ctrl+R', useModifiers: false },
+  { id: 'ctrl-u', label: 'Ctrl+U', data: '\x15', title: 'Ctrl+U', useModifiers: false },
+  { id: 'ctrl-w', label: 'Ctrl+W', data: '\x17', title: 'Ctrl+W', useModifiers: false },
+  { id: 'ctrl-z', label: 'Ctrl+Z', data: '\x1a', title: 'Ctrl+Z', useModifiers: false },
   { id: 'up', label: '↑', data: '\x1b[A', title: 'Arrow Up' },
   { id: 'down', label: '↓', data: '\x1b[B', title: 'Arrow Down' },
   { id: 'left', label: '←', data: '\x1b[D', title: 'Arrow Left' },
@@ -58,6 +78,18 @@ const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
   { id: 'end', label: 'End', data: '\x1b[F', title: 'End' },
   { id: 'page-up', label: 'PgUp', data: '\x1b[5~', title: 'Page Up' },
   { id: 'page-down', label: 'PgDn', data: '\x1b[6~', title: 'Page Down' },
+  { id: 'f1', label: 'F1', data: '\x1bOP', title: 'F1' },
+  { id: 'f2', label: 'F2', data: '\x1bOQ', title: 'F2' },
+  { id: 'f3', label: 'F3', data: '\x1bOR', title: 'F3' },
+  { id: 'f4', label: 'F4', data: '\x1bOS', title: 'F4' },
+  { id: 'f5', label: 'F5', data: '\x1b[15~', title: 'F5' },
+  { id: 'f6', label: 'F6', data: '\x1b[17~', title: 'F6' },
+  { id: 'f7', label: 'F7', data: '\x1b[18~', title: 'F7' },
+  { id: 'f8', label: 'F8', data: '\x1b[19~', title: 'F8' },
+  { id: 'f9', label: 'F9', data: '\x1b[20~', title: 'F9' },
+  { id: 'f10', label: 'F10', data: '\x1b[21~', title: 'F10' },
+  { id: 'f11', label: 'F11', data: '\x1b[23~', title: 'F11' },
+  { id: 'f12', label: 'F12', data: '\x1b[24~', title: 'F12' },
   { id: 'enter', label: 'Enter', data: '\r', title: 'Enter' },
   { id: 'backspace', label: '⌫', data: '\x7f', title: 'Backspace' },
   { id: 'delete', label: 'Del', data: '\x1b[3~', title: 'Delete' },
@@ -67,6 +99,63 @@ const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
   { id: 'dash', label: '-', data: '-', title: 'Dash' },
   { id: 'underscore', label: '_', data: '_', title: 'Underscore' }
 ];
+
+const TERMINAL_ARROW_SEQUENCES: Record<string, string> = {
+  '\x1b[A': 'A',
+  '\x1b[B': 'B',
+  '\x1b[C': 'C',
+  '\x1b[D': 'D'
+};
+
+const TERMINAL_HOME_END_SEQUENCES: Record<string, string> = {
+  '\x1b[H': 'H',
+  '\x1b[F': 'F'
+};
+
+const TERMINAL_SS3_SEQUENCES: Record<string, string> = {
+  '\x1bOP': 'P',
+  '\x1bOQ': 'Q',
+  '\x1bOR': 'R',
+  '\x1bOS': 'S'
+};
+
+const TERMINAL_TILDE_SEQUENCES: Record<string, string> = {
+  '\x1b[3~': '3',
+  '\x1b[5~': '5',
+  '\x1b[6~': '6',
+  '\x1b[15~': '15',
+  '\x1b[17~': '17',
+  '\x1b[18~': '18',
+  '\x1b[19~': '19',
+  '\x1b[20~': '20',
+  '\x1b[21~': '21',
+  '\x1b[23~': '23',
+  '\x1b[24~': '24'
+};
+
+const SHIFTED_TERMINAL_CHARS: Record<string, string> = {
+  '`': '~',
+  '1': '!',
+  '2': '@',
+  '3': '#',
+  '4': '$',
+  '5': '%',
+  '6': '^',
+  '7': '&',
+  '8': '*',
+  '9': '(',
+  '0': ')',
+  '-': '_',
+  '=': '+',
+  '[': '{',
+  ']': '}',
+  '\\': '|',
+  ';': ':',
+  "'": '"',
+  ',': '<',
+  '.': '>',
+  '/': '?'
+};
 
 route().catch((error) => renderError(error));
 
@@ -114,6 +203,7 @@ function relativePath() {
 function setView(html: string) {
   terminalViewportCleanup?.();
   terminalViewportCleanup = null;
+  terminalModifierState.clear();
   activeTerminalFit = null;
   activeTerminalInput = null;
   activeTerminalFocus = null;
@@ -455,9 +545,14 @@ async function renderTerminal(ticket: string) {
 }
 
 function terminalKeyButtons() {
-  return TERMINAL_KEY_ACTIONS.map((action) => `
-    <button class="terminal-key${action.wide ? ' wide' : ''}" type="button" data-terminal-key="${action.id}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
-  `).join('');
+  return `
+    ${TERMINAL_MODIFIER_ACTIONS.map((action) => `
+      <button class="terminal-key modifier" type="button" data-terminal-modifier="${action.id}" aria-pressed="false" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
+    `).join('')}
+    ${TERMINAL_KEY_ACTIONS.map((action) => `
+      <button class="terminal-key${action.wide ? ' wide' : ''}" type="button" data-terminal-key="${action.id}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
+    `).join('')}
+  `;
 }
 
 function updateAuthFields(method: string) {
@@ -557,7 +652,7 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
   });
 
   term.onData((data) => {
-    sendTerminalData(data);
+    sendTerminalData(applyTerminalModifiers(data));
   });
 
   activeTerminalInput = sendTerminalData;
@@ -587,7 +682,17 @@ function setupTerminalMobileToolbar() {
     button.addEventListener('click', () => {
       const action = TERMINAL_KEY_ACTIONS.find((item) => item.id === button.dataset.terminalKey);
       if (!action) return;
-      activeTerminalInput?.(action.data);
+      const data = action.useModifiers === false ? consumeTerminalModifiers(action.data) : applyTerminalModifiers(action.data);
+      activeTerminalInput?.(data);
+      activeTerminalFocus?.();
+    });
+  }
+
+  for (const button of toolbar.querySelectorAll<HTMLButtonElement>('[data-terminal-modifier]')) {
+    button.addEventListener('click', () => {
+      const modifier = button.dataset.terminalModifier as TerminalModifier | undefined;
+      if (!modifier) return;
+      toggleTerminalModifier(modifier, toolbar);
       activeTerminalFocus?.();
     });
   }
@@ -600,6 +705,98 @@ function setupTerminalMobileToolbar() {
     }
     activeTerminalFocus?.();
   });
+}
+
+function toggleTerminalModifier(modifier: TerminalModifier, toolbar?: ParentNode | null) {
+  if (terminalModifierState.has(modifier)) {
+    terminalModifierState.delete(modifier);
+  } else {
+    terminalModifierState.add(modifier);
+  }
+  updateTerminalModifierButtons(toolbar);
+}
+
+function clearTerminalModifiers(toolbar?: ParentNode | null) {
+  if (!terminalModifierState.size) return;
+  terminalModifierState.clear();
+  updateTerminalModifierButtons(toolbar);
+}
+
+function updateTerminalModifierButtons(toolbar: ParentNode | null = document) {
+  const root = toolbar || document;
+  for (const button of root.querySelectorAll<HTMLButtonElement>('[data-terminal-modifier]')) {
+    const active = terminalModifierState.has(button.dataset.terminalModifier as TerminalModifier);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function consumeTerminalModifiers(data: string) {
+  clearTerminalModifiers();
+  return data;
+}
+
+function applyTerminalModifiers(data: string) {
+  if (!terminalModifierState.size) return data;
+
+  const modified = modifiedTerminalData(data);
+  clearTerminalModifiers();
+  return modified;
+}
+
+function modifiedTerminalData(data: string) {
+  const hasAlt = terminalModifierState.has('alt');
+  const hasCtrl = terminalModifierState.has('ctrl');
+  const hasShift = terminalModifierState.has('shift');
+  const modifierCode = terminalModifierCode();
+
+  const arrow = TERMINAL_ARROW_SEQUENCES[data];
+  if (arrow) return `\x1b[1;${modifierCode}${arrow}`;
+
+  const homeEnd = TERMINAL_HOME_END_SEQUENCES[data];
+  if (homeEnd) return `\x1b[1;${modifierCode}${homeEnd}`;
+
+  const ss3 = TERMINAL_SS3_SEQUENCES[data];
+  if (ss3) return `\x1b[1;${modifierCode}${ss3}`;
+
+  const tilde = TERMINAL_TILDE_SEQUENCES[data];
+  if (tilde) return `\x1b[${tilde};${modifierCode}~`;
+
+  if (data.length === 1) {
+    let output = hasShift ? shiftedTerminalCharacter(data) : data;
+    if (hasCtrl) output = controlTerminalCharacter(output) || output;
+    if (hasAlt) output = `\x1b${output}`;
+    return output;
+  }
+
+  return hasAlt ? `\x1b${data}` : data;
+}
+
+function terminalModifierCode() {
+  return 1
+    + (terminalModifierState.has('shift') ? 1 : 0)
+    + (terminalModifierState.has('alt') ? 2 : 0)
+    + (terminalModifierState.has('ctrl') ? 4 : 0);
+}
+
+function shiftedTerminalCharacter(data: string) {
+  if (data >= 'a' && data <= 'z') return data.toUpperCase();
+  return SHIFTED_TERMINAL_CHARS[data] || data;
+}
+
+function controlTerminalCharacter(data: string) {
+  const letter = data.toUpperCase();
+  if (letter >= 'A' && letter <= 'Z') {
+    return String.fromCharCode(letter.charCodeAt(0) - 64);
+  }
+  if (data === ' ' || data === '@' || data === '`') return '\x00';
+  if (data === '[') return '\x1b';
+  if (data === '\\') return '\x1c';
+  if (data === ']') return '\x1d';
+  if (data === '^') return '\x1e';
+  if (data === '_' || data === '/') return '\x1f';
+  if (data === '?') return '\x7f';
+  return '';
 }
 
 function setupTerminalViewportControls() {

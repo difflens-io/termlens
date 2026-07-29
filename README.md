@@ -26,7 +26,7 @@ TermLens is designed around a few practical principles:
 
 - 🖥️ Browser-based SSH terminal powered by xterm.js.
 - 📐 Collapsible connection panel, resizable terminal layout, native fullscreen, and Safari-friendly immersive fullscreen fallback.
-- 📱 Mobile terminal helper toolbar with terminal-friendly keys and soft-keyboard-aware sizing.
+- 📱 RustDesk-style mobile helper toolbar with one-shot `Ctrl`/`Alt`/`Shift`, function keys, navigation keys, shell symbols, and soft-keyboard-aware sizing.
 - 👥 Admin-managed users, roles, SSH targets, and per-target permissions.
 - 📋 Admin access-link actions for copying or copying-and-opening generated links.
 - 🔗 Random per-user access links before login and terminal launch.
@@ -112,7 +112,7 @@ The terminal page has two main areas:
 
 - 🧾 **Connection panel**: target summary, SSH auth method, password/private-key fields, collapse control.
 - ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, native fullscreen, and immersive fullscreen fallback for mobile Safari.
-- 📱 **Mobile helper toolbar**: quick keys for terminal input that mobile keyboards often hide or omit.
+- 📱 **Mobile helper toolbar**: RustDesk-style one-shot `Ctrl`/`Alt`/`Shift`, common `Ctrl` shortcuts, `F1`-`F12`, navigation keys, and shell symbols that mobile keyboards often hide or omit.
 
 ## 🛡️ Security Model
 
@@ -278,8 +278,9 @@ Store the generated password and access URL securely. Rotate the password and ac
 2. 🔑 Log in with password and TOTP. First login may require scanning a QR code.
 3. 🖥️ Choose an authorized SSH target.
 4. ⌨️ Enter SSH password or private key for the current connection.
-5. 📐 Collapse the connection panel, resize the terminal, or enter fullscreen mode as needed.
-6. 🚪 Close the terminal and log out when finished.
+5. 📱 On mobile, use the helper toolbar for one-shot modifiers, function keys, navigation keys, and symbols that the system keyboard hides.
+6. 📐 Collapse the connection panel, resize the terminal, or enter fullscreen mode as needed.
+7. 🚪 Close the terminal and log out when finished.
 
 ## 🚧 Limitations
 
