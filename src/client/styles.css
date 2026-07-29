@@ -246,6 +246,40 @@ textarea {
   color: var(--danger);
 }
 
+.access-link-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 0;
+  border: 1px solid #b7e3ce;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f1fbf6;
+}
+
+.access-link-result strong,
+.access-link-result code {
+  display: block;
+}
+
+.access-link-result code {
+  max-width: min(780px, 58vw);
+  margin-top: 4px;
+  overflow-x: auto;
+  color: #1f364c;
+  font:
+    12px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  white-space: nowrap;
+}
+
+.access-link-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .qr-box {
   display: grid;
   place-items: center;
@@ -483,6 +517,31 @@ th {
   min-height: 0;
 }
 
+body.terminal-immersive-active {
+  overflow: hidden;
+}
+
+.terminal-panel.terminal-immersive {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  width: 100vw;
+  height: var(--terminal-viewport-height, 100vh);
+  border: 0;
+  border-radius: 0;
+}
+
+.terminal-panel.terminal-immersive .terminal-panel-header {
+  padding-top: max(8px, env(safe-area-inset-top));
+  padding-right: max(10px, env(safe-area-inset-right));
+  padding-left: max(10px, env(safe-area-inset-left));
+}
+
+.terminal-panel.terminal-immersive #terminal {
+  height: auto;
+  min-height: 0;
+}
+
 @media (max-width: 880px) {
   .topbar,
   .hero-panel,
@@ -561,10 +620,15 @@ th {
     padding: 8px;
   }
 
+  .terminal-panel.terminal-immersive {
+    height: var(--terminal-viewport-height, 100vh);
+  }
+
   .mobile-terminal-toolbar {
     display: block;
     flex: 0 0 auto;
     border-top: 1px solid rgba(148, 163, 184, 0.25);
+    padding-bottom: env(safe-area-inset-bottom);
     background: #0f1724;
   }
 
@@ -601,5 +665,22 @@ th {
 
   .terminal-key.wide {
     min-width: 58px;
+  }
+
+  .access-link-result {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .access-link-result code {
+    max-width: 100%;
+  }
+
+  .access-link-actions {
+    width: 100%;
+  }
+
+  .access-link-actions .button {
+    flex: 1 1 0;
   }
 }

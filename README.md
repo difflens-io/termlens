@@ -25,9 +25,10 @@ TermLens is designed around a few practical principles:
 ## ✨ Features
 
 - 🖥️ Browser-based SSH terminal powered by xterm.js.
-- 📐 Collapsible connection panel, resizable terminal layout, and fullscreen terminal mode.
+- 📐 Collapsible connection panel, resizable terminal layout, native fullscreen, and Safari-friendly immersive fullscreen fallback.
 - 📱 Mobile terminal helper toolbar with terminal-friendly keys and soft-keyboard-aware sizing.
 - 👥 Admin-managed users, roles, SSH targets, and per-target permissions.
+- 📋 Admin access-link actions for copying or copying-and-opening generated links.
 - 🔗 Random per-user access links before login and terminal launch.
 - 🔑 Mandatory password + TOTP authentication with QR-code enrollment.
 - 🎟️ Short-lived one-time terminal tickets before WebSocket connection.
@@ -110,7 +111,7 @@ sequenceDiagram
 The terminal page has two main areas:
 
 - 🧾 **Connection panel**: target summary, SSH auth method, password/private-key fields, collapse control.
-- ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, fullscreen mode.
+- ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, native fullscreen, and immersive fullscreen fallback for mobile Safari.
 - 📱 **Mobile helper toolbar**: quick keys for terminal input that mobile keyboards often hide or omit.
 
 ## 🛡️ Security Model

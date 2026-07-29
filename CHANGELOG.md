@@ -17,6 +17,8 @@ Initial public release.
 - Added session, access-link, target-permission, and ticket checks before forwarding terminal input.
 - Added collapsible connection panel, resizable terminal layout, and fullscreen terminal mode.
 - Added mobile terminal helper keys and visual-viewport-aware terminal sizing.
+- Added Safari-friendly terminal immersive fullscreen fallback.
+- Added copy and copy-and-open actions for generated admin access links.
 - Added systemd and nginx deployment examples.
 - Added English and Chinese documentation.
 - Added design philosophy, system architecture diagrams, interaction-flow diagrams, deployment steps, and usage guides to the documentation.

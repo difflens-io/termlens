@@ -119,6 +119,7 @@ function setView(html: string) {
   activeTerminalFocus = null;
   activeTerminalBlur = null;
   document.body.classList.remove('terminal-page');
+  document.body.classList.remove('terminal-immersive-active');
   document.documentElement.style.removeProperty('--terminal-viewport-height');
   app.innerHTML = html;
 }
@@ -137,6 +138,57 @@ function showMessage(message: string, kind: 'ok' | 'error' = 'ok') {
   if (!node) return;
   node.textContent = message;
   node.className = `message ${kind}`;
+}
+
+function showAccessLinkActions(accessUrl: string, title: string) {
+  const node = document.querySelector<HTMLDivElement>('#message');
+  if (!node) return;
+  node.className = 'message access-link-result';
+  node.innerHTML = `
+    <div>
+      <strong>${escapeHtml(title)}</strong>
+      <code>${escapeHtml(accessUrl)}</code>
+    </div>
+    <div class="access-link-actions">
+      <button class="button small" type="button" data-copy-access-url="${escapeHtml(accessUrl)}">复制</button>
+      <button class="button small primary" type="button" data-open-access-url="${escapeHtml(accessUrl)}">复制并打开</button>
+    </div>
+  `;
+  node.querySelector<HTMLButtonElement>('[data-copy-access-url]')?.addEventListener('click', async (event) => {
+    const url = event.currentTarget.dataset.copyAccessUrl || accessUrl;
+    try {
+      await copyText(url);
+      event.currentTarget.textContent = '已复制';
+    } catch (error) {
+      showMessage((error as Error).message, 'error');
+    }
+  });
+  node.querySelector<HTMLButtonElement>('[data-open-access-url]')?.addEventListener('click', async (event) => {
+    const url = event.currentTarget.dataset.openAccessUrl || accessUrl;
+    try {
+      await copyText(url);
+    } catch (error) {
+      // Opening the generated link is the primary action here; copying is best effort.
+    }
+    location.href = url;
+  });
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('复制失败，请手动复制访问链接。');
 }
 
 async function renderHome() {
@@ -590,22 +642,48 @@ function setupTerminalLayoutControls() {
   expandButton?.addEventListener('click', () => setCollapsed(false));
   fitButton?.addEventListener('click', () => scheduleTerminalFit());
 
+  const setImmersive = (enabled: boolean) => {
+    terminalPanel.classList.toggle('terminal-immersive', enabled);
+    document.body.classList.toggle('terminal-immersive-active', enabled);
+    if (fullscreenButton) fullscreenButton.textContent = enabled ? '退出全屏' : '全屏';
+    if (enabled) window.scrollTo(0, 0);
+    scheduleTerminalFit();
+  };
+
   fullscreenButton?.addEventListener('click', async () => {
-    try {
-      if (document.fullscreenElement === terminalPanel) {
+    if (document.fullscreenElement === terminalPanel) {
+      try {
         await document.exitFullscreen();
-      } else {
+      } catch (error) {
+        showMessage((error as Error).message, 'error');
+      }
+      return;
+    }
+    if (terminalPanel.classList.contains('terminal-immersive')) {
+      setImmersive(false);
+      return;
+    }
+    try {
+      if (document.fullscreenEnabled && terminalPanel.requestFullscreen) {
         await terminalPanel.requestFullscreen();
+      } else {
+        setImmersive(true);
       }
       scheduleTerminalFit();
     } catch (error) {
-      showMessage((error as Error).message, 'error');
+      setImmersive(true);
     }
   });
 
   document.addEventListener('fullscreenchange', () => {
+    if (document.fullscreenElement === terminalPanel) {
+      setImmersive(false);
+    }
     if (fullscreenButton) {
-      fullscreenButton.textContent = document.fullscreenElement === terminalPanel ? '退出全屏' : '全屏';
+      fullscreenButton.textContent =
+        document.fullscreenElement === terminalPanel || terminalPanel.classList.contains('terminal-immersive')
+          ? '退出全屏'
+          : '全屏';
     }
     scheduleTerminalFit();
   });
@@ -812,8 +890,8 @@ function bindAdminEvents() {
         method: 'POST',
         json: Object.fromEntries(form.entries())
       });
-      showMessage(`用户已创建，访问链接：${result.accessUrl}`);
       await renderAdmin();
+      showAccessLinkActions(result.accessUrl, '用户已创建，访问链接');
     } catch (error) {
       showMessage((error as Error).message, 'error');
     }
@@ -850,7 +928,7 @@ function bindAdminEvents() {
           method: 'POST',
           json: { label: 'manual' }
         });
-        showMessage(`新访问链接：${result.accessUrl}`);
+        showAccessLinkActions(result.accessUrl, '新访问链接');
       } catch (error) {
         showMessage((error as Error).message, 'error');
       }
