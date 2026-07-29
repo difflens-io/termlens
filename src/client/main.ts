@@ -6,6 +6,10 @@ import './styles.css';
 const BASE_PATH = import.meta.env.BASE_URL;
 const app = document.querySelector<HTMLDivElement>('#app');
 let activeTerminalFit: (() => void) | null = null;
+let activeTerminalInput: ((data: string) => void) | null = null;
+let activeTerminalFocus: (() => void) | null = null;
+let activeTerminalBlur: (() => void) | null = null;
+let terminalViewportCleanup: (() => void) | null = null;
 
 if (!app) throw new Error('Missing #app root');
 
@@ -28,6 +32,41 @@ interface User {
   totpEnabled: boolean;
   disabled: boolean;
 }
+
+interface TerminalKeyAction {
+  id: string;
+  label: string;
+  data: string;
+  title: string;
+  wide?: boolean;
+}
+
+const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
+  { id: 'esc', label: 'Esc', data: '\x1b', title: 'Escape' },
+  { id: 'tab', label: 'Tab', data: '\t', title: 'Tab' },
+  { id: 'ctrl-a', label: 'Ctrl A', data: '\x01', title: 'Ctrl+A' },
+  { id: 'ctrl-c', label: 'Ctrl C', data: '\x03', title: 'Ctrl+C' },
+  { id: 'ctrl-d', label: 'Ctrl D', data: '\x04', title: 'Ctrl+D' },
+  { id: 'ctrl-e', label: 'Ctrl E', data: '\x05', title: 'Ctrl+E' },
+  { id: 'ctrl-l', label: 'Ctrl L', data: '\x0c', title: 'Ctrl+L' },
+  { id: 'ctrl-z', label: 'Ctrl Z', data: '\x1a', title: 'Ctrl+Z' },
+  { id: 'up', label: '↑', data: '\x1b[A', title: 'Arrow Up' },
+  { id: 'down', label: '↓', data: '\x1b[B', title: 'Arrow Down' },
+  { id: 'left', label: '←', data: '\x1b[D', title: 'Arrow Left' },
+  { id: 'right', label: '→', data: '\x1b[C', title: 'Arrow Right' },
+  { id: 'home', label: 'Home', data: '\x1b[H', title: 'Home' },
+  { id: 'end', label: 'End', data: '\x1b[F', title: 'End' },
+  { id: 'page-up', label: 'PgUp', data: '\x1b[5~', title: 'Page Up' },
+  { id: 'page-down', label: 'PgDn', data: '\x1b[6~', title: 'Page Down' },
+  { id: 'enter', label: 'Enter', data: '\r', title: 'Enter' },
+  { id: 'backspace', label: '⌫', data: '\x7f', title: 'Backspace' },
+  { id: 'delete', label: 'Del', data: '\x1b[3~', title: 'Delete' },
+  { id: 'pipe', label: '|', data: '|', title: 'Pipe' },
+  { id: 'tilde', label: '~', data: '~', title: 'Tilde' },
+  { id: 'slash', label: '/', data: '/', title: 'Slash' },
+  { id: 'dash', label: '-', data: '-', title: 'Dash' },
+  { id: 'underscore', label: '_', data: '_', title: 'Underscore' }
+];
 
 route().catch((error) => renderError(error));
 
@@ -73,6 +112,14 @@ function relativePath() {
 }
 
 function setView(html: string) {
+  terminalViewportCleanup?.();
+  terminalViewportCleanup = null;
+  activeTerminalFit = null;
+  activeTerminalInput = null;
+  activeTerminalFocus = null;
+  activeTerminalBlur = null;
+  document.body.classList.remove('terminal-page');
+  document.documentElement.style.removeProperty('--terminal-viewport-height');
   app.innerHTML = html;
 }
 
@@ -321,11 +368,20 @@ async function renderTerminal(ticket: string) {
           </div>
         </div>
         <div id="terminal"></div>
+        <div id="mobileTerminalToolbar" class="mobile-terminal-toolbar" aria-label="移动端终端辅助按键">
+          <div class="mobile-terminal-toolbar-row">
+            ${terminalKeyButtons()}
+            <button id="terminalKeyboardButton" class="terminal-key wide" type="button" title="显示或隐藏系统键盘">键盘</button>
+          </div>
+        </div>
       </section>
     </section>
   `));
 
+  document.body.classList.add('terminal-page');
   setupTerminalLayoutControls();
+  setupTerminalViewportControls();
+  setupTerminalMobileToolbar();
 
   const methodSelect = document.querySelector<HTMLSelectElement>('#authMethod');
   methodSelect?.addEventListener('change', () => updateAuthFields(methodSelect.value));
@@ -344,6 +400,12 @@ async function renderTerminal(ticket: string) {
       passphrase: String(form.get('passphrase') || '')
     });
   });
+}
+
+function terminalKeyButtons() {
+  return TERMINAL_KEY_ACTIONS.map((action) => `
+    <button class="terminal-key${action.wide ? ' wide' : ''}" type="button" data-terminal-key="${action.id}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
+  `).join('');
 }
 
 function updateAuthFields(method: string) {
@@ -391,6 +453,8 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
   };
 
   activeTerminalFit = fitAndSendSize;
+  activeTerminalFocus = () => term.focus();
+  activeTerminalBlur = () => document.querySelector<HTMLElement>('#terminal .xterm-helper-textarea')?.blur();
   scheduleTerminalFit();
   if (terminalPanel && 'ResizeObserver' in window) {
     const resizeObserver = new ResizeObserver(() => scheduleTerminalFit());
@@ -441,14 +505,68 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
   });
 
   term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'data', data }));
-    }
+    sendTerminalData(data);
   });
+
+  activeTerminalInput = sendTerminalData;
 
   window.addEventListener('resize', () => {
     fitAndSendSize();
   });
+
+  function sendTerminalData(data: string) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'data', data }));
+    }
+  }
+}
+
+function setupTerminalMobileToolbar() {
+  const toolbar = document.querySelector<HTMLElement>('#mobileTerminalToolbar');
+  if (!toolbar) return;
+
+  toolbar.addEventListener('pointerdown', (event) => {
+    const target = event.target as HTMLElement | null;
+    if (!target?.closest('button')) return;
+    event.preventDefault();
+  });
+
+  for (const button of toolbar.querySelectorAll<HTMLButtonElement>('[data-terminal-key]')) {
+    button.addEventListener('click', () => {
+      const action = TERMINAL_KEY_ACTIONS.find((item) => item.id === button.dataset.terminalKey);
+      if (!action) return;
+      activeTerminalInput?.(action.data);
+      activeTerminalFocus?.();
+    });
+  }
+
+  document.querySelector<HTMLButtonElement>('#terminalKeyboardButton')?.addEventListener('click', () => {
+    const terminalElement = document.querySelector<HTMLElement>('#terminal .xterm');
+    if (terminalElement && document.activeElement && terminalElement.contains(document.activeElement)) {
+      activeTerminalBlur?.();
+      return;
+    }
+    activeTerminalFocus?.();
+  });
+}
+
+function setupTerminalViewportControls() {
+  const updateViewportHeight = () => {
+    const height = window.visualViewport?.height || window.innerHeight;
+    document.documentElement.style.setProperty('--terminal-viewport-height', `${height}px`);
+    scheduleTerminalFit();
+  };
+
+  updateViewportHeight();
+  window.visualViewport?.addEventListener('resize', updateViewportHeight);
+  window.visualViewport?.addEventListener('scroll', updateViewportHeight);
+  window.addEventListener('orientationchange', updateViewportHeight);
+
+  terminalViewportCleanup = () => {
+    window.visualViewport?.removeEventListener('resize', updateViewportHeight);
+    window.visualViewport?.removeEventListener('scroll', updateViewportHeight);
+    window.removeEventListener('orientationchange', updateViewportHeight);
+  };
 }
 
 function setupTerminalLayoutControls() {

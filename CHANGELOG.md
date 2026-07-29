@@ -16,9 +16,11 @@ Initial public release.
 - Added short-lived one-time terminal tickets before WebSocket connection.
 - Added session, access-link, target-permission, and ticket checks before forwarding terminal input.
 - Added collapsible connection panel, resizable terminal layout, and fullscreen terminal mode.
+- Added mobile terminal helper keys and visual-viewport-aware terminal sizing.
 - Added systemd and nginx deployment examples.
 - Added English and Chinese documentation.
 - Added design philosophy, system architecture diagrams, interaction-flow diagrams, deployment steps, and usage guides to the documentation.
+- Added a roadmap for private endpoint relay support for computers without public IP addresses.
 - Added a security policy and production hardening guidance.
 
 ### Security

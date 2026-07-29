@@ -1,6 +1,6 @@
 # TermLens
 
-[English README](README.md) | [更新日志](CHANGELOG.zh-CN.md) | [安全说明](SECURITY.md)
+[English README](README.md) | [路线图](ROADMAP.zh-CN.md) | [更新日志](CHANGELOG.zh-CN.md) | [安全说明](SECURITY.md)
 
 ![License](https://img.shields.io/badge/license-MIT-0f766e)
 ![Node](https://img.shields.io/badge/node-%3E%3D24-2563eb)
@@ -26,6 +26,7 @@ TermLens 围绕几个务实原则设计：
 
 - 🖥️ 基于 xterm.js 的浏览器 SSH 终端。
 - 📐 左侧连接面板可折叠，终端布局可拖拽调整，并支持终端全屏。
+- 📱 移动端终端辅助按键栏，提供终端常用按键和软键盘遮挡优化。
 - 👥 管理后台可管理用户、角色、SSH 目标和目标权限。
 - 🔗 用户必须通过专属随机访问链接进入登录流程。
 - 🔑 强制密码 + TOTP 双因子验证，首次登录通过二维码设置 TOTP。
@@ -33,6 +34,7 @@ TermLens 围绕几个务实原则设计：
 - 🛡️ 终端输入转发到 SSH 前会检查登录会话、访问链接、目标权限和 ticket。
 - 🚫 远程 SSH 密码和私钥只在当前连接中使用，不写入数据库。
 - 📵 不内置统计上报，也不持久化终端输出。
+- 🛰️ 没有公网 IP 的私有电脑中继访问能力已在 [路线图](ROADMAP.zh-CN.md) 中规划。
 
 ## 🏗️ 系统架构
 
@@ -109,6 +111,7 @@ sequenceDiagram
 
 - 🧾 **连接面板**：目标信息、SSH 认证方式、密码/私钥字段、折叠控制。
 - ⌨️ **终端面板**：xterm.js 终端、适配按钮、可响应尺寸变化的布局和全屏模式。
+- 📱 **移动端辅助按键栏**：提供手机键盘经常隐藏或缺失的终端常用按键。
 
 ## 🛡️ 安全模型
 

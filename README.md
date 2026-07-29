@@ -1,6 +1,6 @@
 # TermLens
 
-[中文说明](README.zh-CN.md) | [Changelog](CHANGELOG.md) | [Security](SECURITY.md)
+[中文说明](README.zh-CN.md) | [Roadmap](ROADMAP.md) | [Changelog](CHANGELOG.md) | [Security](SECURITY.md)
 
 ![License](https://img.shields.io/badge/license-MIT-0f766e)
 ![Node](https://img.shields.io/badge/node-%3E%3D24-2563eb)
@@ -26,6 +26,7 @@ TermLens is designed around a few practical principles:
 
 - 🖥️ Browser-based SSH terminal powered by xterm.js.
 - 📐 Collapsible connection panel, resizable terminal layout, and fullscreen terminal mode.
+- 📱 Mobile terminal helper toolbar with terminal-friendly keys and soft-keyboard-aware sizing.
 - 👥 Admin-managed users, roles, SSH targets, and per-target permissions.
 - 🔗 Random per-user access links before login and terminal launch.
 - 🔑 Mandatory password + TOTP authentication with QR-code enrollment.
@@ -33,6 +34,7 @@ TermLens is designed around a few practical principles:
 - 🛡️ Session, access-link, target-permission, and ticket checks before terminal input is forwarded to SSH.
 - 🚫 Remote SSH passwords and private keys are used only for the current connection and are not stored.
 - 📵 No application telemetry and no terminal-output persistence.
+- 🛰️ Private endpoint relay for computers without public IP addresses is tracked in [Roadmap](ROADMAP.md).
 
 ## 🏗️ System Architecture
 
@@ -109,6 +111,7 @@ The terminal page has two main areas:
 
 - 🧾 **Connection panel**: target summary, SSH auth method, password/private-key fields, collapse control.
 - ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, fullscreen mode.
+- 📱 **Mobile helper toolbar**: quick keys for terminal input that mobile keyboards often hide or omit.
 
 ## 🛡️ Security Model
 
