@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+*.log
+*.pid
+tmp/
+data/
+*.sqlite
+*.sqlite-*
+*admin-bootstrap*.json
+dist/
+node_modules/
+.DS_Store

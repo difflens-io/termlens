@@ -1,0 +1,24 @@
+[Unit]
+Description=TermLens web SSH terminal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=termlens
+Group=termlens
+WorkingDirectory=/opt/termlens
+EnvironmentFile=/etc/termlens/termlens.env
+ExecStart=/usr/bin/node /opt/termlens/src/server/index.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/termlens
+CapabilityBoundingSet=
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

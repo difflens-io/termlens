@@ -1,0 +1,30 @@
+# 更新日志
+
+[English Changelog](CHANGELOG.md)
+
+## 0.1.0
+
+首次公开发布。
+
+### 新增
+
+- 新增 TermLens WebSSH 网关初始版本。
+- 新增基于 xterm.js 的浏览器终端和基于 `ssh2` 的 Node.js SSH 后端。
+- 新增后台用户、角色、SSH 目标和目标权限管理。
+- 新增用户专属随机访问链接。
+- 新增强制密码 + TOTP 登录和二维码设置流程。
+- 新增 WebSocket 连接前的短期一次性 terminal ticket。
+- 新增终端输入转发前的登录会话、访问链接、目标权限和 ticket 校验。
+- 新增左侧连接面板折叠、终端布局拖拽调整和终端全屏模式。
+- 新增 systemd 和 nginx 部署示例。
+- 新增英文和中文文档。
+- 在文档中补充设计理念、系统架构图、交互流程图、部署步骤和使用说明。
+- 新增安全策略和生产部署加固说明。
+
+### 安全
+
+- SSH 凭据只用于当前连接，不写入数据库。
+- 访问链接、terminal ticket 和 session token 只以哈希形式存储。
+- TOTP secret 使用 `TERMLENS_SECRET_KEY` 加密后落盘。
+- 应用不持久化终端输出。
+- 用户界面的 SSH 连接失败提示避免暴露后端连接细节。
