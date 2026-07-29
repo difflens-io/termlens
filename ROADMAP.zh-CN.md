@@ -34,13 +34,13 @@
 
 ## 🛰️ 私有终端中继
 
-状态：规划中。
+状态：首版已实现，可通过可选开关 `TERMLENS_PRIVATE_RELAY_ENABLED` 启用。
 
 这个优化项面向没有公网 IP 的电脑，例如本地笔记本、台式机、家庭实验室机器或 NAT 后的内网服务器。目标是在异地通过 Web 终端访问本地电脑，同时不把本地电脑直接暴露到公网。
 
 ### 推荐架构
 
-TermLens 不应该让浏览器直接连接私有电脑。浏览器不能打开 SSH TCP 连接，NAT 后的私有电脑也无法被公网直接访问。更合理的方案是类似 RustDesk 的中继模型：
+TermLens 不会让浏览器直接连接私有电脑。浏览器不能打开 SSH TCP 连接，NAT 后的私有电脑也无法被公网直接访问。当前实现采用类似 RustDesk 的中继模型：
 
 ```mermaid
 flowchart LR
@@ -52,7 +52,7 @@ flowchart LR
 
   Browser <-->|HTTPS + WebSocket| TermLens
   TermLens <-->|授权隧道会话| Relay
-  Agent <-->|出站 mTLS/WebSocket 隧道| Relay
+  Agent <-->|token 鉴权的出站 WebSocket 隧道| Relay
   Agent <-->|本地 TCP SSH| LocalSSH
 ```
 
@@ -82,7 +82,7 @@ sequenceDiagram
 ### 安全要求
 
 - 🔐 Agent 注册 token 必须是一次性或短期有效。
-- 🧷 Agent 完成注册后必须绑定持久密钥对身份。
+- 🧷 Agent 完成注册后会绑定持久 Agent token；密钥对或 mTLS 身份可作为后续安全加固项。
 - 🛰️ Relay 不能自己决定授权；TermLens 仍然是权限策略中心。
 - 🎟️ 每次中继会话都必须要求 TermLens terminal ticket。
 - 👥 用户必须显式拥有对应私有 endpoint 的访问权限。
@@ -92,31 +92,31 @@ sequenceDiagram
 
 ### 实现阶段
 
-1. **Endpoint 模型**
+1. **Endpoint 模型** ✅
    - 在 TermLens 中新增私有 endpoint 记录。
    - 记录 owner、名称、在线状态、最后心跳时间和允许的本地目标。
 
-2. **TermLens Agent**
+2. **TermLens Agent** ✅
    - 运行在私有电脑上。
-   - 主动通过 mTLS/WebSocket 连接 Relay。
+   - 主动通过 token 鉴权的 WebSocket 连接 Relay。
    - 只转发被允许的本地 SSH TCP 连接。
 
-3. **Relay 服务**
+3. **Relay 服务** ✅
    - 负责加密隧道会话中继。
    - 不保存 SSH 凭据或终端输出。
    - 执行会话绑定和背压控制。
 
-4. **管理后台**
+4. **管理后台** ✅
    - 创建 endpoint 注册 token。
    - 展示在线/离线状态。
    - 给用户授予 endpoint 权限。
 
-5. **终端打开流程**
+5. **终端打开流程** ✅
    - 用户可以选择普通 SSH 目标或私有中继 endpoint。
    - 复用 TermLens 登录、TOTP、访问链接、目标权限和 terminal ticket。
 
-6. **安全加固**
-   - 增加限流、空闲超时、endpoint 吊销、Agent 密钥轮换和 Relay 审计事件。
+6. **安全加固** 规划中
+   - 增加限流、空闲超时、endpoint 吊销、Agent token 轮换、可选密钥对或 mTLS 身份和更深入的 Relay 审计事件。
 
 ### 非目标
 

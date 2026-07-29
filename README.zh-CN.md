@@ -37,7 +37,7 @@ TermLens 围绕几个务实原则设计：
 - 🛡️ 终端输入转发到 SSH 前会检查登录会话、访问链接、目标权限和 ticket。
 - 🚫 远程 SSH 密码和私钥只在当前连接中使用，不写入数据库。
 - 📵 不内置统计上报，也不持久化终端输出。
-- 🛰️ 没有公网 IP 的私有电脑中继访问能力已在 [路线图](ROADMAP.zh-CN.md) 中规划。
+- 🛰️ 可选私有终端中继模块，用于没有公网 IP 的电脑，通过本地主动出站 Agent 安全接入。
 
 ## 🏗️ 系统架构
 
@@ -194,8 +194,35 @@ npm run init-admin
 | `TERMLENS_SESSION_TTL_SECONDS` | 浏览器登录会话有效期。 |
 | `TERMLENS_TICKET_TTL_SECONDS` | terminal ticket 有效期。 |
 | `TERMLENS_SECRET_KEY` | 敏感信息加密密钥，必填。 |
+| `TERMLENS_PRIVATE_RELAY_ENABLED` | 启用可选私有终端中继模块，默认 `false`。 |
+| `TERMLENS_PRIVATE_RELAY_ALLOW_NON_LOOPBACK` | 允许私有 Agent 转发非 loopback 本地地址，默认 `false`。 |
+| `TERMLENS_PRIVATE_RELAY_ENROLLMENT_TTL_SECONDS` | Agent 一次性注册 token 有效期。 |
+| `TERMLENS_PRIVATE_RELAY_MAX_STREAMS_PER_AGENT` | 每个 Agent 的并发 SSH 隧道流数量上限。 |
 
 `.env.example`、`systemd/` 和 `nginx/` 中出现的路径都是通用部署示例，请按自己的环境替换。
+
+## 🛰️ 可选私有终端中继
+
+私有终端中继默认关闭，只有设置 `TERMLENS_PRIVATE_RELAY_ENABLED=true` 后才会启用。启用后，管理员可以创建私有 endpoint，生成一次性 Agent 注册命令，并给用户分配私有 endpoint 权限。
+
+Agent 运行在本地笔记本或台式机上，主动通过 WebSocket 连接 TermLens。浏览器用户仍然必须经过访问链接、密码、TOTP、权限和 terminal ticket 校验。TermLens 会通过 Agent 隧道连接 Agent 本机的 SSH 服务。
+
+Agent 接入流程：
+
+1. 在 TermLens 后端启用私有中继模块。
+2. 在管理后台创建私有终端。
+3. 复制生成的 Agent 注册命令。
+4. 在私有电脑的 TermLens checkout 目录安装依赖后执行注册命令。
+5. 使用 `npm run private-agent -- run` 启动 Agent。
+6. 给用户授予这个私有终端的访问权限。
+
+安全默认值：
+
+- 注册 token 一次性、短期有效。
+- Agent token 只保存在私有电脑上，通过 WebSocket `Authorization` header 发送，TermLens 只保存哈希。
+- Agent 默认只转发 `127.0.0.1:22` 这类本机 loopback SSH。
+- 非 loopback 转发需要后端和 Agent 双侧显式开启。
+- 该模块由功能开关隔离，可以从部署流程中完全省略。
 
 ## 📦 生产部署
 

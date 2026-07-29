@@ -14,6 +14,9 @@ TermLens exposes SSH terminal access through a browser. Treat every deployment a
 - Do not log terminal output, passwords, private keys, tokens, or SSH commands.
 - Do not commit `.env`, databases, access-link output, or bootstrap admin credentials.
 - Keep TermLens dependencies, OpenSSH, nginx, and the host OS patched.
+- Keep the optional private endpoint relay disabled unless it is explicitly needed.
+- Treat Agent enrollment commands and Agent config files as secrets.
+- Keep private Agents loopback-only unless you have reviewed the risk of non-loopback forwarding.
 
 ## Recommended Hardening
 
@@ -24,6 +27,7 @@ TermLens exposes SSH terminal access through a browser. Treat every deployment a
 - Monitor service restarts and reverse-proxy access logs.
 - Rate-limit repeated failed authentication attempts at the proxy layer.
 - Use remote-host controls for command-level authorization. TermLens can revoke a WebSSH session, but it cannot safely enforce every command after the remote shell starts.
+- Do not use the private endpoint relay as a general-purpose TCP proxy. The first supported use case is SSH to an admin-approved endpoint.
 - Replace all example paths, domains, users, and ports with values from your own environment before deployment.
 
 ## Reporting

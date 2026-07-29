@@ -23,9 +23,11 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:private-relay": "node --check src/server/private-relay.js && node --check src/agent/private-agent.js",
     "dev": "vite --host 0.0.0.0",
     "start": "node src/server/index.js",
     "init-admin": "node scripts/init-admin.js",
+    "private-agent": "node src/agent/private-agent.js",
     "test": "node --test"
   },
   "dependencies": {

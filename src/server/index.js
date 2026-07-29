@@ -30,6 +30,7 @@ import {
   verifyPassword,
   verifyTotp
 } from './security.js';
+import { createPrivateRelay } from './private-relay.js';
 
 if (!config.secretKey) {
   throw new Error('TERMLENS_SECRET_KEY must be set before starting TermLens.');
@@ -69,6 +70,7 @@ app.get(mountPath, (req, res, next) => {
 });
 const router = express.Router();
 app.use(mountPath, router);
+const privateRelay = createPrivateRelay({ config, db, audit, mountPath });
 
 router.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -85,7 +87,10 @@ router.get('/api/me', (req, res) => {
   res.json({
     authenticated: true,
     user: sanitizeUser(auth.user),
-    accessLinkId: auth.session.access_link_id
+    accessLinkId: auth.session.access_link_id,
+    features: {
+      privateRelay: privateRelay.enabled
+    }
   });
 });
 
@@ -189,17 +194,47 @@ router.get('/api/launch/:token', requireAuth, (req, res) => {
   }
   res.json({
     user: sanitizeUser(req.auth.user),
-    targets: getAllowedTargets(req.auth.user.id)
+    targets: [
+      ...getAllowedTargets(req.auth.user.id),
+      ...privateRelay.getAllowedEndpoints(req.auth.user.id)
+    ]
   });
 });
 
 router.post('/api/terminal/tickets', requireAuth, (req, res) => {
   const accessToken = String(req.body?.accessToken || '');
   const targetId = Number(req.body?.targetId);
+  const targetKind = req.body?.targetKind === 'private' ? 'private' : 'ssh';
   const link = getAccessLinkByToken(accessToken);
   if (!isAccessLinkUsable(link) || link.user_id !== req.auth.user.id) {
     return res.status(403).json({ error: '访问链接无效' });
   }
+
+  if (targetKind === 'private') {
+    const endpoint = privateRelay.getAllowedEndpoint(req.auth.user.id, targetId);
+    if (!endpoint) return res.status(403).json({ error: '没有该私有终端的连接权限' });
+    if (!privateRelay.onlineEndpointIds().has(endpoint.id)) {
+      return res.status(409).json({ error: '私有终端 Agent 不在线' });
+    }
+    const expiresAt = new Date(Date.now() + config.ticketTtlSeconds * 1000).toISOString();
+    const ticket = privateRelay.createTerminalTicket({
+      userId: req.auth.user.id,
+      endpointId: endpoint.id,
+      accessLinkId: link.id,
+      expiresAt
+    });
+    audit({
+      userId: req.auth.user.id,
+      type: 'private_terminal_ticket_created',
+      details: { endpointId: endpoint.id, accessLinkId: link.id },
+      req
+    });
+    return res.json({
+      ticket,
+      terminalUrl: `${config.basePath}terminal?ticket=${encodeURIComponent(ticket)}`
+    });
+  }
+
   const target = getAllowedTarget(req.auth.user.id, targetId);
   if (!target) return res.status(403).json({ error: '没有该目标的连接权限' });
 
@@ -224,15 +259,13 @@ router.post('/api/terminal/tickets', requireAuth, (req, res) => {
 });
 
 router.get('/api/terminal/tickets/:ticket', requireAuth, (req, res) => {
-  const ticket = findTicket(req.params.ticket);
-  if (!ticket || ticket.user_id !== req.auth.user.id || !isTicketFresh(ticket)) {
+  const context = findTerminalTicketContext(req.params.ticket, req.auth.user.id);
+  if (!context || !isTicketFresh(context.ticket)) {
     return res.status(404).json({ error: '终端票据无效或已过期' });
   }
-  const target = getAllowedTarget(req.auth.user.id, ticket.target_id);
-  if (!target) return res.status(403).json({ error: '没有该目标的连接权限' });
   res.json({
-    target: publicTarget(target),
-    expiresAt: ticket.expires_at
+    target: context.publicTarget,
+    expiresAt: context.ticket.expires_at
   });
 });
 
@@ -370,6 +403,8 @@ router.put('/api/admin/users/:id/permissions', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+privateRelay.installRoutes(router, { requireAuth, requireAdmin });
+
 if (fs.existsSync(config.distDir)) {
   router.use(express.static(config.distDir, { index: false, maxAge: '1h', redirect: false }));
 }
@@ -383,6 +418,8 @@ router.get(/.*/, (_req, res) => {
 });
 
 server.on('upgrade', (req, socket, head) => {
+  if (privateRelay.handleAgentUpgrade(req, socket, head)) return;
+
   const url = new URL(req.url || '/', 'http://localhost');
   if (url.pathname !== `${mountPath}/ws/terminal`) {
     rejectUpgrade(req, socket, 404, 'Unknown WebSocket endpoint.');
@@ -396,25 +433,20 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   const ticketToken = url.searchParams.get('ticket') || '';
-  const ticket = findTicket(ticketToken);
-  if (!ticket || ticket.user_id !== auth.user.id || !isTicketFresh(ticket)) {
+  const context = findTerminalTicketContext(ticketToken, auth.user.id);
+  if (!context || !isTicketFresh(context.ticket)) {
     rejectUpgrade(req, socket, 403, 'Terminal ticket is invalid, used, or expired.', auth.user.id, {
       reason: 'invalid_ticket'
     });
     return;
   }
-  const target = getAllowedTarget(auth.user.id, ticket.target_id);
-  if (!target) {
-    rejectUpgrade(req, socket, 403, 'Target permission is required.', auth.user.id, {
-      reason: 'target_permission',
-      targetId: ticket.target_id
-    });
-    return;
+  if (context.kind === 'ssh') {
+    db.prepare('UPDATE terminal_tickets SET used_at = ? WHERE id = ?').run(nowIso(), context.ticket.id);
+  } else {
+    privateRelay.markTicketUsed(context.ticket.id);
   }
-
-  db.prepare('UPDATE terminal_tickets SET used_at = ? WHERE id = ?').run(nowIso(), ticket.id);
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req, { auth, ticket, target });
+    wss.emit('connection', ws, req, { auth, ...context });
   });
 });
 
@@ -578,6 +610,7 @@ function getAllowedTarget(userId, targetId) {
 
 function publicTarget(row) {
   return {
+    kind: 'ssh',
     id: row.id,
     name: row.name,
     host: row.host,
@@ -592,6 +625,34 @@ function publicTarget(row) {
 function findTicket(ticketToken) {
   if (!ticketToken) return null;
   return db.prepare('SELECT * FROM terminal_tickets WHERE ticket_hash = ?').get(hashToken(ticketToken));
+}
+
+function findTerminalTicketContext(ticketToken, userId) {
+  const ticket = findTicket(ticketToken);
+  if (ticket && ticket.user_id === userId) {
+    const target = getAllowedTarget(userId, ticket.target_id);
+    if (!target) return null;
+    return {
+      kind: 'ssh',
+      ticket,
+      target,
+      publicTarget: publicTarget(target)
+    };
+  }
+
+  const privateTicket = privateRelay.findTerminalTicket(ticketToken);
+  if (privateTicket && privateTicket.user_id === userId) {
+    const endpoint = privateRelay.getAllowedEndpoint(userId, privateTicket.endpoint_id);
+    if (!endpoint) return null;
+    return {
+      kind: 'private',
+      ticket: privateTicket,
+      target: endpoint,
+      publicTarget: privateRelay.publicEndpoint(endpoint)
+    };
+  }
+
+  return null;
 }
 
 function isTicketFresh(ticket) {
@@ -621,7 +682,7 @@ function rejectUpgrade(req, socket, statusCode, message, userId = null, details 
   socket.destroy();
 }
 
-function canUseTerminal(sessionId, userId, accessLinkId, targetId) {
+function canUseSshTerminal(sessionId, userId, accessLinkId, targetId) {
   const now = nowIso();
   const session = db.prepare(`
     SELECT sessions.id
@@ -645,14 +706,17 @@ function canUseTerminal(sessionId, userId, accessLinkId, targetId) {
   return Boolean(session);
 }
 
-function handleTerminalSocket(ws, req, { auth, ticket, target }) {
+function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
   let ssh = null;
   let stream = null;
   let connected = false;
   let size = { cols: 100, rows: 30 };
 
   const denyIfUnauthorized = () => {
-    if (canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)) return false;
+    const allowed = kind === 'private'
+      ? privateRelay.canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)
+      : canUseSshTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id);
+    if (allowed) return false;
     ws.send(JSON.stringify({ type: 'error', message: '登录状态或连接权限已失效' }));
     ws.close(4003, 'permission revoked');
     return true;
@@ -679,10 +743,22 @@ function handleTerminalSocket(ws, req, { auth, ticket, target }) {
       if (connected) return;
       connected = true;
       size = normalizeTerminalSize(message);
-      startSshSession(ws, req, auth, target, message.auth || {}, size, (client, shellStream) => {
+      const assignSession = (client, shellStream) => {
         ssh = client;
         stream = shellStream;
-      });
+      };
+      if (kind === 'private') {
+        privateRelay
+          .startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession)
+          .catch(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'error', message: '私有终端连接初始化失败。' }));
+              ws.close(1011, 'private terminal init failed');
+            }
+          });
+      } else {
+        startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession);
+      }
       return;
     }
 
@@ -694,7 +770,12 @@ function handleTerminalSocket(ws, req, { auth, ticket, target }) {
   ws.on('close', () => {
     if (stream) stream.end();
     if (ssh) ssh.end();
-    audit({ userId: auth.user.id, type: 'terminal_socket_closed', details: { targetId: target.id }, req });
+    audit({
+      userId: auth.user.id,
+      type: kind === 'private' ? 'private_terminal_socket_closed' : 'terminal_socket_closed',
+      details: kind === 'private' ? { endpointId: target.id } : { targetId: target.id },
+      req
+    });
   });
 }
 

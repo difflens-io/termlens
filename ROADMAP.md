@@ -34,13 +34,13 @@ Future mobile improvements:
 
 ## 🛰️ Private Endpoint Relay
 
-Status: planned.
+Status: first implementation available behind the optional `TERMLENS_PRIVATE_RELAY_ENABLED` flag.
 
 This item targets computers without a public IP address, such as a local laptop, desktop, homelab machine, or on-prem server behind NAT. The goal is to let an authorized user open a Web terminal from another network without exposing the local machine directly to the public internet.
 
 ### Recommended Architecture
 
-TermLens should not ask the browser to connect directly to a private computer. Browsers cannot open SSH TCP connections, and a private machine behind NAT is not reachable from the public internet. A RustDesk-like relay model is the practical design:
+TermLens does not ask the browser to connect directly to a private computer. Browsers cannot open SSH TCP connections, and a private machine behind NAT is not reachable from the public internet. The implemented design follows a RustDesk-like relay model:
 
 ```mermaid
 flowchart LR
@@ -52,7 +52,7 @@ flowchart LR
 
   Browser <-->|HTTPS + WebSocket| TermLens
   TermLens <-->|authorized tunnel session| Relay
-  Agent <-->|outbound mTLS/WebSocket tunnel| Relay
+  Agent <-->|token-authenticated outbound WebSocket tunnel| Relay
   Agent <-->|local TCP SSH| LocalSSH
 ```
 
@@ -82,7 +82,7 @@ sequenceDiagram
 ### Security Requirements
 
 - 🔐 Agent enrollment tokens must be one-time or short-lived.
-- 🧷 Agent identity must be bound to a persistent key pair after enrollment.
+- 🧷 Agent identity is bound to a persistent Agent token after enrollment; key-pair or mTLS identity can be added as a hardening step.
 - 🛰️ Relay must not grant access by itself; TermLens remains the policy authority.
 - 🎟️ Every relay session must require a TermLens terminal ticket.
 - 👥 Users need explicit permission for each private endpoint.
@@ -92,31 +92,31 @@ sequenceDiagram
 
 ### Implementation Phases
 
-1. **Endpoint model**
+1. **Endpoint model** ✅
    - Add private endpoint records to TermLens.
    - Track owner, label, online status, last seen time, and allowed local target.
 
-2. **TermLens Agent**
+2. **TermLens Agent** ✅
    - Run on the private computer.
-   - Establish outbound mTLS/WebSocket connection to Relay.
+   - Establish outbound token-authenticated WebSocket connection to Relay.
    - Forward only approved local SSH TCP connections.
 
-3. **Relay service**
+3. **Relay service** ✅
    - Broker encrypted tunnel sessions.
    - Avoid storing SSH credentials or terminal output.
    - Enforce session binding and backpressure.
 
-4. **Admin console**
+4. **Admin console** ✅
    - Create endpoint enrollment tokens.
    - Show online/offline status.
    - Grant endpoint permissions to users.
 
-5. **Terminal launch**
+5. **Terminal launch** ✅
    - Let users choose normal SSH targets or private relay endpoints.
    - Reuse TermLens login, TOTP, access links, target permissions, and terminal tickets.
 
-6. **Hardening**
-   - Add rate limits, idle timeouts, endpoint revocation, agent key rotation, and relay audit events.
+6. **Hardening** Planned
+   - Add rate limits, idle timeouts, endpoint revocation, agent token rotation, optional key-pair or mTLS identity, and deeper relay audit events.
 
 ### Non-goals
 

@@ -19,10 +19,14 @@ type ApiOptions = RequestInit & { json?: unknown };
 
 interface Target {
   id: number;
+  kind?: 'ssh' | 'private';
   name: string;
   host: string;
   port: number;
   sshUsername: string;
+  online?: boolean;
+  agentEnrolled?: boolean;
+  lastSeenAt?: string;
   disabled?: boolean;
 }
 
@@ -33,6 +37,12 @@ interface User {
   role: 'admin' | 'user';
   totpEnabled: boolean;
   disabled: boolean;
+}
+
+interface PrivateEnrollment {
+  token: string;
+  expiresAt: string;
+  command: string;
 }
 
 interface TerminalKeyAction {
@@ -435,6 +445,31 @@ function showAccessLinkActions(accessUrl: string, title: string) {
   });
 }
 
+function showPrivateEnrollmentActions(enrollment: PrivateEnrollment) {
+  const node = document.querySelector<HTMLDivElement>('#message');
+  if (!node) return;
+  node.className = 'message access-link-result';
+  node.innerHTML = `
+    <div>
+      <strong>Agent 注册命令</strong>
+      <code>${escapeHtml(enrollment.command)}</code>
+      <span>有效期至 ${escapeHtml(enrollment.expiresAt)}。注册命令包含一次性 token，请通过安全渠道使用。</span>
+    </div>
+    <div class="access-link-actions">
+      <button class="button small primary" type="button" data-copy-agent-command="${escapeHtml(enrollment.command)}">复制命令</button>
+    </div>
+  `;
+  node.querySelector<HTMLButtonElement>('[data-copy-agent-command]')?.addEventListener('click', async (event) => {
+    const command = event.currentTarget.dataset.copyAgentCommand || enrollment.command;
+    try {
+      await copyText(command);
+      event.currentTarget.textContent = '已复制';
+    } catch (error) {
+      showMessage((error as Error).message, 'error');
+    }
+  });
+}
+
 async function copyText(value: string) {
   if (navigator.clipboard && window.isSecureContext) {
     await navigator.clipboard.writeText(value);
@@ -598,10 +633,11 @@ async function renderLaunch(token: string) {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-connect-target]')) {
     button.addEventListener('click', async () => {
       const targetId = Number(button.dataset.connectTarget);
+      const targetKind = button.dataset.targetKind === 'private' ? 'private' : 'ssh';
       try {
         const ticket = await api<{ terminalUrl: string }>('terminal/tickets', {
           method: 'POST',
-          json: { accessToken: token, targetId }
+          json: { accessToken: token, targetId, targetKind }
         });
         location.href = ticket.terminalUrl;
       } catch (error) {
@@ -612,13 +648,16 @@ async function renderLaunch(token: string) {
 }
 
 function targetCard(target: Target) {
+  const isPrivate = target.kind === 'private';
+  const disabled = Boolean(target.disabled || (isPrivate && !target.online));
   return `
     <article class="target-card">
       <div>
-        <h2>${escapeHtml(target.name)}</h2>
+        <h2>${escapeHtml(target.name)}${isPrivate ? ' <span class="target-badge">私有终端</span>' : ''}</h2>
         <p>${escapeHtml(target.sshUsername)}@${escapeHtml(target.host)}:${target.port}</p>
+        ${isPrivate ? `<p class="target-status ${target.online ? 'online' : 'offline'}">${target.online ? 'Agent 在线' : 'Agent 离线'}</p>` : ''}
       </div>
-      <button class="button primary" type="button" data-connect-target="${target.id}">打开终端</button>
+      <button class="button primary" type="button" data-connect-target="${target.id}" data-target-kind="${escapeHtml(target.kind || 'ssh')}" ${disabled ? 'disabled' : ''}>打开终端</button>
     </article>
   `;
 }
@@ -1366,7 +1405,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 async function renderAdmin() {
-  const me = await api<{ authenticated: boolean; user?: User }>('me');
+  const me = await api<{ authenticated: boolean; user?: User; features?: { privateRelay?: boolean } }>('me');
   if (!me.authenticated || me.user?.role !== 'admin') {
     setView(shell(`
       <section class="panel">
@@ -1377,10 +1416,15 @@ async function renderAdmin() {
     return;
   }
 
-  const [{ users, links }, { targets }] = await Promise.all([
+  const privateRelayEnabled = Boolean(me.features?.privateRelay);
+  const [{ users, links }, { targets }, privateEndpointsPayload] = await Promise.all([
     api<{ users: User[]; links: Array<Record<string, unknown>> }>('admin/users'),
-    api<{ targets: Target[] }>('admin/targets')
+    api<{ targets: Target[] }>('admin/targets'),
+    privateRelayEnabled
+      ? api<{ endpoints: Target[] }>('admin/private-endpoints')
+      : Promise.resolve({ endpoints: [] as Target[] })
   ]);
+  const privateEndpoints = privateEndpointsPayload.endpoints;
 
   setView(shell(`
     <section class="workspace-head">
@@ -1410,6 +1454,18 @@ async function renderAdmin() {
         <label><span>SSH 用户</span><input name="sshUsername" required /></label>
         <button class="button primary" type="submit">创建目标</button>
       </form>
+
+      ${privateRelayEnabled ? `
+        <form id="createPrivateEndpointForm" class="panel">
+          <h2>新增私有终端</h2>
+          <p class="muted">用于本地笔记本或 NAT 后电脑。默认只允许 Agent 转发本机 SSH。</p>
+          <label><span>名称</span><input name="name" required /></label>
+          <label><span>本地 Host</span><input name="localHost" value="127.0.0.1" required /></label>
+          <label><span>本地端口</span><input name="localPort" type="number" value="22" min="1" max="65535" required /></label>
+          <label><span>SSH 用户</span><input name="sshUsername" required /></label>
+          <button class="button primary" type="submit">创建并生成 Agent 注册命令</button>
+        </form>
+      ` : ''}
     </section>
 
     <section class="panel">
@@ -1457,6 +1513,32 @@ async function renderAdmin() {
       </div>
     </section>
 
+    ${privateRelayEnabled ? `
+      <section class="panel">
+        <h2>私有终端</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>名称</th><th>本地地址</th><th>Agent</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              ${privateEndpoints.map((endpoint) => `
+                <tr>
+                  <td>${endpoint.id}</td>
+                  <td>${escapeHtml(endpoint.name)}</td>
+                  <td>${escapeHtml(endpoint.sshUsername)}@${escapeHtml(endpoint.host)}:${endpoint.port}</td>
+                  <td>${endpoint.agentEnrolled ? '已注册' : '未注册'}${endpoint.lastSeenAt ? `<br><span>${escapeHtml(endpoint.lastSeenAt)}</span>` : ''}</td>
+                  <td>${endpoint.disabled ? '禁用' : endpoint.online ? '在线' : '离线'}</td>
+                  <td class="action-cell">
+                    <button class="button small" data-private-enrollment="${endpoint.id}" type="button">注册命令</button>
+                    <button class="button small" data-toggle-private-endpoint="${endpoint.id}" data-disabled="${endpoint.disabled ? '0' : '1'}" type="button">${endpoint.disabled ? '启用' : '禁用'}</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    ` : ''}
+
     <section class="panel">
       <h2>用户目标权限</h2>
       <form id="permissionForm" class="permission-form">
@@ -1477,6 +1559,29 @@ async function renderAdmin() {
         <button class="button primary" type="submit">保存权限</button>
       </form>
     </section>
+
+    ${privateRelayEnabled ? `
+      <section class="panel">
+        <h2>用户私有终端权限</h2>
+        <form id="privatePermissionForm" class="permission-form">
+          <label>
+            <span>用户</span>
+            <select name="userId">
+              ${users.map((user) => `<option value="${user.id}">${escapeHtml(user.username)}</option>`).join('')}
+            </select>
+          </label>
+          <div class="checkbox-list">
+            ${privateEndpoints.map((endpoint) => `
+              <label class="checkbox-row">
+                <input type="checkbox" name="endpointIds" value="${endpoint.id}" />
+                <span>${escapeHtml(endpoint.name)} (${escapeHtml(endpoint.sshUsername)}@${escapeHtml(endpoint.host)}:${endpoint.port})</span>
+              </label>
+            `).join('') || '<div class="empty">暂无私有终端。</div>'}
+          </div>
+          <button class="button primary" type="submit">保存私有终端权限</button>
+        </form>
+      </section>
+    ` : ''}
 
     <section class="panel">
       <h2>访问链接记录</h2>
@@ -1508,6 +1613,11 @@ async function renderAdmin() {
     selectedUser.addEventListener('change', () => loadPermissions(Number(selectedUser.value)));
     await loadPermissions(Number(selectedUser.value));
   }
+  const selectedPrivateUser = document.querySelector<HTMLSelectElement>('#privatePermissionForm select[name="userId"]');
+  if (selectedPrivateUser) {
+    selectedPrivateUser.addEventListener('change', () => loadPrivatePermissions(Number(selectedPrivateUser.value)));
+    await loadPrivatePermissions(Number(selectedPrivateUser.value));
+  }
 }
 
 function bindAdminEvents() {
@@ -1537,6 +1647,21 @@ function bindAdminEvents() {
     }
   });
 
+  document.querySelector<HTMLFormElement>('#createPrivateEndpointForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await api<{ enrollment: PrivateEnrollment }>('admin/private-endpoints', {
+        method: 'POST',
+        json: Object.fromEntries(form.entries())
+      });
+      await renderAdmin();
+      showPrivateEnrollmentActions(result.enrollment);
+    } catch (error) {
+      showMessage((error as Error).message, 'error');
+    }
+  });
+
   document.querySelector<HTMLFormElement>('#permissionForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -1545,6 +1670,19 @@ function bindAdminEvents() {
     try {
       await api(`admin/users/${userId}/permissions`, { method: 'PUT', json: { targetIds } });
       showMessage('权限已保存');
+    } catch (error) {
+      showMessage((error as Error).message, 'error');
+    }
+  });
+
+  document.querySelector<HTMLFormElement>('#privatePermissionForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const userId = Number(form.get('userId'));
+    const endpointIds = form.getAll('endpointIds').map(Number);
+    try {
+      await api(`admin/users/${userId}/private-permissions`, { method: 'PUT', json: { endpointIds } });
+      showMessage('私有终端权限已保存');
     } catch (error) {
       showMessage((error as Error).message, 'error');
     }
@@ -1590,12 +1728,44 @@ function bindAdminEvents() {
       await renderAdmin();
     });
   });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-private-enrollment]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const result = await api<{ enrollment: PrivateEnrollment }>(
+          `admin/private-endpoints/${button.dataset.privateEnrollment}/enrollment`,
+          { method: 'POST', json: {} }
+        );
+        showPrivateEnrollmentActions(result.enrollment);
+      } catch (error) {
+        showMessage((error as Error).message, 'error');
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-toggle-private-endpoint]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await api(`admin/private-endpoints/${button.dataset.togglePrivateEndpoint}/disabled`, {
+        method: 'POST',
+        json: { disabled: button.dataset.disabled === '1' }
+      });
+      await renderAdmin();
+    });
+  });
 }
 
 async function loadPermissions(userId: number) {
   const payload = await api<{ targetIds: number[] }>(`admin/users/${userId}/permissions`);
   const allowed = new Set(payload.targetIds);
   document.querySelectorAll<HTMLInputElement>('#permissionForm input[name="targetIds"]').forEach((input) => {
+    input.checked = allowed.has(Number(input.value));
+  });
+}
+
+async function loadPrivatePermissions(userId: number) {
+  const payload = await api<{ endpointIds: number[] }>(`admin/users/${userId}/private-permissions`);
+  const allowed = new Set(payload.endpointIds);
+  document.querySelectorAll<HTMLInputElement>('#privatePermissionForm input[name="endpointIds"]').forEach((input) => {
     input.checked = allowed.has(Number(input.value));
   });
 }

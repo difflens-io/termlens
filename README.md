@@ -37,7 +37,7 @@ TermLens is designed around a few practical principles:
 - 🛡️ Session, access-link, target-permission, and ticket checks before terminal input is forwarded to SSH.
 - 🚫 Remote SSH passwords and private keys are used only for the current connection and are not stored.
 - 📵 No application telemetry and no terminal-output persistence.
-- 🛰️ Private endpoint relay for computers without public IP addresses is tracked in [Roadmap](ROADMAP.md).
+- 🛰️ Optional private endpoint relay for computers without public IP addresses, implemented as an opt-in module with a local outbound Agent.
 
 ## 🏗️ System Architecture
 
@@ -194,8 +194,35 @@ See [.env.example](.env.example) for all supported environment variables.
 | `TERMLENS_SESSION_TTL_SECONDS` | Browser login session lifetime. |
 | `TERMLENS_TICKET_TTL_SECONDS` | Terminal ticket lifetime. |
 | `TERMLENS_SECRET_KEY` | Required encryption key for sensitive values. |
+| `TERMLENS_PRIVATE_RELAY_ENABLED` | Enables the optional private endpoint relay module. Defaults to `false`. |
+| `TERMLENS_PRIVATE_RELAY_ALLOW_NON_LOOPBACK` | Allows private Agents to forward non-loopback local hosts. Defaults to `false`. |
+| `TERMLENS_PRIVATE_RELAY_ENROLLMENT_TTL_SECONDS` | Lifetime for one-time Agent enrollment tokens. |
+| `TERMLENS_PRIVATE_RELAY_MAX_STREAMS_PER_AGENT` | Concurrent SSH tunnel stream limit per Agent. |
 
 Paths shown in `.env.example`, `systemd/`, and `nginx/` are generic deployment examples. Replace them with paths that match your own environment.
+
+## 🛰️ Optional Private Endpoint Relay
+
+The private endpoint relay is disabled unless `TERMLENS_PRIVATE_RELAY_ENABLED=true` is set. When enabled, admins can create private endpoints, generate one-time Agent enrollment commands, and grant endpoint permissions to users.
+
+The Agent runs on the private laptop or desktop and opens an outbound WebSocket to TermLens. Browser users still go through the normal access-link, password, TOTP, permission, and terminal-ticket flow. TermLens then opens SSH over the Agent tunnel to the Agent's local SSH service.
+
+Agent setup flow:
+
+1. Enable the module on the TermLens backend.
+2. Create a private endpoint in the admin console.
+3. Copy the generated Agent enrollment command.
+4. Run the command from a TermLens checkout on the private computer after installing dependencies.
+5. Start the Agent with `npm run private-agent -- run`.
+6. Grant users permission to the private endpoint.
+
+Security defaults:
+
+- Enrollment tokens are one-time and short-lived.
+- Agent tokens are stored only on the private computer, sent through the WebSocket `Authorization` header, and only hashes are stored by TermLens.
+- The Agent forwards `127.0.0.1:22`-style loopback SSH by default.
+- Non-loopback forwarding requires explicit opt-in on both backend and Agent.
+- The module is isolated behind a feature flag and can be omitted from deployment workflows.
 
 ## 📦 Production Deployment
 

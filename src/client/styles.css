@@ -311,6 +311,39 @@ textarea {
     12px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+.target-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-left: 6px;
+  border: 1px solid #b8c7dc;
+  border-radius: 999px;
+  padding: 0 7px;
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+.target-card .target-status {
+  margin-top: 4px;
+  font-family: inherit;
+  font-weight: 800;
+}
+
+.target-status.online {
+  color: var(--ok);
+}
+
+.target-status.offline {
+  color: var(--danger);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .empty {
   grid-column: 1 / -1;
   border: 1px dashed #b8c7dc;

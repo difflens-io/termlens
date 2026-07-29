@@ -19,6 +19,12 @@ function numberFromEnv(name, fallback) {
   return parsed;
 }
 
+function booleanFromEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  return raw === 'true' || raw === '1';
+}
+
 export const config = {
   projectRoot,
   distDir: path.resolve(projectRoot, 'dist/client'),
@@ -37,7 +43,15 @@ export const config = {
   cookieSecure: process.env.TERMLENS_COOKIE_SECURE
     ? process.env.TERMLENS_COOKIE_SECURE === 'true'
     : process.env.NODE_ENV === 'production',
-  secretKey: process.env.TERMLENS_SECRET_KEY || ''
+  secretKey: process.env.TERMLENS_SECRET_KEY || '',
+  privateRelay: {
+    enabled: booleanFromEnv('TERMLENS_PRIVATE_RELAY_ENABLED', false),
+    allowNonLoopback: booleanFromEnv('TERMLENS_PRIVATE_RELAY_ALLOW_NON_LOOPBACK', false),
+    enrollmentTtlSeconds: numberFromEnv('TERMLENS_PRIVATE_RELAY_ENROLLMENT_TTL_SECONDS', 10 * 60),
+    agentHeartbeatSeconds: numberFromEnv('TERMLENS_PRIVATE_RELAY_AGENT_HEARTBEAT_SECONDS', 30),
+    maxStreamsPerAgent: numberFromEnv('TERMLENS_PRIVATE_RELAY_MAX_STREAMS_PER_AGENT', 4),
+    streamOpenTimeoutSeconds: numberFromEnv('TERMLENS_PRIVATE_RELAY_STREAM_OPEN_TIMEOUT_SECONDS', 15)
+  }
 };
 
 export const mountPath = config.basePath.slice(0, -1);
