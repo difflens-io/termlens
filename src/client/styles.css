@@ -114,7 +114,8 @@ table span {
 .panel,
 .target-card,
 .connect-panel,
-.terminal-panel {
+.terminal-panel,
+.terminal-text-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -376,17 +377,24 @@ th {
 
 .terminal-shell {
   display: grid;
-  grid-template-columns: var(--connect-panel-width, 320px) 10px minmax(0, 1fr);
+  --connect-column-width: var(--connect-panel-width, 320px);
+  --terminal-text-column-width: var(--terminal-text-panel-width, 300px);
+  grid-template-columns: var(--connect-column-width) 10px minmax(0, 1fr) var(--terminal-text-column-width);
   gap: 8px;
   height: calc(100vh - 92px);
   min-height: 480px;
 }
 
 .terminal-shell.connect-collapsed {
-  grid-template-columns: 44px 10px minmax(0, 1fr);
+  --connect-column-width: 44px;
 }
 
-.connect-panel {
+.terminal-shell.text-collapsed {
+  --terminal-text-column-width: 44px;
+}
+
+.connect-panel,
+.terminal-text-panel {
   position: relative;
   min-width: 0;
   overflow: hidden;
@@ -394,22 +402,26 @@ th {
 }
 
 .connect-panel-header,
-.terminal-panel-header {
+.terminal-panel-header,
+.terminal-text-panel-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.connect-panel-header {
+.connect-panel-header,
+.terminal-text-panel-header {
   margin-bottom: 14px;
 }
 
-.connect-panel-content {
+.connect-panel-content,
+.terminal-text-panel-content {
   min-width: 0;
 }
 
-.connect-expand-button {
+.connect-expand-button,
+.terminal-text-expand-button {
   position: absolute;
   inset: 8px;
   display: none;
@@ -425,15 +437,18 @@ th {
   writing-mode: vertical-rl;
 }
 
-.terminal-shell.connect-collapsed .connect-panel {
+.terminal-shell.connect-collapsed .connect-panel,
+.terminal-shell.text-collapsed .terminal-text-panel {
   padding: 0;
 }
 
-.terminal-shell.connect-collapsed .connect-panel-content {
+.terminal-shell.connect-collapsed .connect-panel-content,
+.terminal-shell.text-collapsed .terminal-text-panel-content {
   display: none;
 }
 
-.terminal-shell.connect-collapsed .connect-expand-button {
+.terminal-shell.connect-collapsed .connect-expand-button,
+.terminal-shell.text-collapsed .terminal-text-expand-button {
   display: flex;
 }
 
@@ -492,6 +507,125 @@ th {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.terminal-key-profile {
+  min-height: 30px;
+  border-color: rgba(148, 163, 184, 0.45);
+  background: #172234;
+  color: #d6e0f0;
+  font-size: 12px;
+}
+
+.terminal-key-settings {
+  flex: 0 0 auto;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  padding: 8px 10px 10px;
+  background: #0c1421;
+  color: #d6e0f0;
+}
+
+.terminal-key-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.terminal-key-order-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(176px, 1fr));
+  gap: 7px;
+  max-height: 168px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.terminal-key-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 6px;
+  padding: 6px;
+  background: #121d2d;
+}
+
+.terminal-key-visible {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #d6e0f0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.terminal-key-visible span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-key-visible input {
+  width: 15px;
+  min-height: 15px;
+}
+
+.terminal-key-order-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-key-order-actions .button {
+  min-width: 30px;
+}
+
+.terminal-text-panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+
+.terminal-text-panel-header strong,
+.terminal-text-panel-header small {
+  display: block;
+}
+
+.terminal-text-panel-header strong {
+  font-size: 13px;
+}
+
+.terminal-text-panel-header small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#terminalTextBuffer {
+  flex: 1 1 auto;
+  min-height: 180px;
+  resize: none;
+  font:
+    12px/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.terminal-text-panel-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.terminal-text-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+  margin-top: 10px;
 }
 
 #terminal {
@@ -588,6 +722,21 @@ body.terminal-immersive-active {
     height: calc(var(--terminal-viewport-height, 100vh) - 20px);
   }
 
+  .terminal-page .terminal-panel-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .terminal-page .terminal-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .terminal-page .terminal-key-profile {
+    flex: 1 1 110px;
+    min-width: 0;
+  }
+
   .terminal-page .connect-panel {
     flex: 0 0 auto;
     max-height: 45vh;
@@ -607,6 +756,53 @@ body.terminal-immersive-active {
   .terminal-page .terminal-panel {
     flex: 1 1 auto;
     min-height: 0;
+  }
+
+  .terminal-page .terminal-text-panel {
+    flex: 0 0 auto;
+    max-height: 28vh;
+    padding: 10px;
+  }
+
+  .terminal-page .terminal-shell.text-collapsed .terminal-text-panel {
+    max-height: 42px;
+    padding: 0;
+  }
+
+  .terminal-page .terminal-shell.text-collapsed .terminal-text-expand-button {
+    writing-mode: horizontal-tb;
+  }
+
+  .terminal-page .terminal-text-panel-header {
+    margin-bottom: 8px;
+  }
+
+  .terminal-page #terminalTextBuffer {
+    min-height: 74px;
+  }
+
+  .terminal-page .terminal-text-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .terminal-page .terminal-text-actions .button {
+    min-width: 0;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .terminal-page .terminal-text-actions .button:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .terminal-page .terminal-key-settings {
+    max-height: 28vh;
+    overflow-y: auto;
+  }
+
+  .terminal-page .terminal-key-order-list {
+    grid-template-columns: repeat(auto-fit, minmax(146px, 1fr));
+    max-height: none;
   }
 
   #terminal {

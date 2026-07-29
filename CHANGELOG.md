@@ -18,6 +18,7 @@ Initial public release.
 - Added collapsible connection panel, resizable terminal layout, and fullscreen terminal mode.
 - Added mobile terminal helper keys and visual-viewport-aware terminal sizing.
 - Added RustDesk-style one-shot mobile modifier keys plus `F1`-`F12` terminal helper keys.
+- Added platform-aware `Cmd`/`Win` terminal key labels, configurable helper-key order/visibility, and a side text input panel for sending prepared text to the terminal cursor.
 - Added Safari-friendly terminal immersive fullscreen fallback.
 - Added copy and copy-and-open actions for generated admin access links.
 - Added systemd and nginx deployment examples.

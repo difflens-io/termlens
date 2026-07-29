@@ -5,6 +5,7 @@ import './styles.css';
 
 const BASE_PATH = import.meta.env.BASE_URL;
 const app = document.querySelector<HTMLDivElement>('#app');
+const TERMINAL_KEY_CONFIG_STORAGE = 'termlens.terminalKeyConfig.v1';
 let activeTerminalFit: (() => void) | null = null;
 let activeTerminalInput: ((data: string) => void) | null = null;
 let activeTerminalFocus: (() => void) | null = null;
@@ -43,18 +44,53 @@ interface TerminalKeyAction {
   useModifiers?: boolean;
 }
 
-type TerminalModifier = 'ctrl' | 'alt' | 'shift';
+type TerminalModifier = 'ctrl' | 'alt' | 'shift' | 'meta';
+type TerminalKeyProfile = 'auto' | 'macos' | 'windows' | 'linux';
+type TerminalToolbarItemType = 'modifier' | 'key' | 'utility';
 
 interface TerminalModifierAction {
   id: TerminalModifier;
   label: string;
   title: string;
+  labels?: Partial<Record<TerminalEffectivePlatform, string>>;
+  titles?: Partial<Record<TerminalEffectivePlatform, string>>;
 }
+
+interface TerminalUtilityAction {
+  id: string;
+  label: string;
+  title: string;
+  wide?: boolean;
+}
+
+interface TerminalToolbarItem {
+  type: TerminalToolbarItemType;
+  id: string;
+}
+
+interface TerminalKeyConfig {
+  profile: TerminalKeyProfile;
+  order: string[];
+  hidden: string[];
+}
+
+type TerminalEffectivePlatform = Exclude<TerminalKeyProfile, 'auto'>;
 
 const TERMINAL_MODIFIER_ACTIONS: TerminalModifierAction[] = [
   { id: 'ctrl', label: 'Ctrl', title: '下一个按键使用 Ctrl' },
   { id: 'alt', label: 'Alt', title: '下一个按键使用 Alt/Meta' },
-  { id: 'shift', label: 'Shift', title: '下一个按键使用 Shift' }
+  { id: 'shift', label: 'Shift', title: '下一个按键使用 Shift' },
+  {
+    id: 'meta',
+    label: 'Meta',
+    title: '下一个按键使用 Meta/Super',
+    labels: { macos: 'Cmd', windows: 'Win', linux: 'Super' },
+    titles: {
+      macos: '下一个按键使用 Command/Meta',
+      windows: '下一个按键使用 Windows/Meta',
+      linux: '下一个按键使用 Super/Meta'
+    }
+  }
 ];
 
 const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
@@ -98,6 +134,10 @@ const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
   { id: 'slash', label: '/', data: '/', title: 'Slash' },
   { id: 'dash', label: '-', data: '-', title: 'Dash' },
   { id: 'underscore', label: '_', data: '_', title: 'Underscore' }
+];
+
+const TERMINAL_UTILITY_ACTIONS: TerminalUtilityAction[] = [
+  { id: 'keyboard', label: '键盘', title: '显示或隐藏系统键盘', wide: true }
 ];
 
 const TERMINAL_ARROW_SEQUENCES: Record<string, string> = {
@@ -156,6 +196,117 @@ const SHIFTED_TERMINAL_CHARS: Record<string, string> = {
   '.': '>',
   '/': '?'
 };
+
+function terminalItemKey(item: TerminalToolbarItem) {
+  return `${item.type}:${item.id}`;
+}
+
+function parseTerminalItemKey(key: string): TerminalToolbarItem | null {
+  const [type, id] = key.split(':');
+  if ((type === 'modifier' || type === 'key' || type === 'utility') && id) {
+    return { type, id };
+  }
+  return null;
+}
+
+function terminalDefaultOrder() {
+  return [
+    ...TERMINAL_MODIFIER_ACTIONS.map((action) => terminalItemKey({ type: 'modifier', id: action.id })),
+    ...TERMINAL_KEY_ACTIONS.map((action) => terminalItemKey({ type: 'key', id: action.id })),
+    ...TERMINAL_UTILITY_ACTIONS.map((action) => terminalItemKey({ type: 'utility', id: action.id }))
+  ];
+}
+
+function knownTerminalItemKeys() {
+  return new Set(terminalDefaultOrder());
+}
+
+function isTerminalKeyProfile(value: unknown): value is TerminalKeyProfile {
+  return value === 'auto' || value === 'macos' || value === 'windows' || value === 'linux';
+}
+
+function normalizeTerminalKeyConfig(value: Partial<TerminalKeyConfig> = {}): TerminalKeyConfig {
+  const defaultOrder = terminalDefaultOrder();
+  const known = new Set(defaultOrder);
+  const order: string[] = [];
+
+  for (const key of Array.isArray(value.order) ? value.order : []) {
+    if (known.has(key) && !order.includes(key)) order.push(key);
+  }
+  for (const key of defaultOrder) {
+    if (!order.includes(key)) order.push(key);
+  }
+
+  const hidden = Array.isArray(value.hidden)
+    ? Array.from(new Set(value.hidden.filter((key) => known.has(key))))
+    : [];
+
+  return {
+    profile: isTerminalKeyProfile(value.profile) ? value.profile : 'auto',
+    order,
+    hidden
+  };
+}
+
+function loadTerminalKeyConfig() {
+  try {
+    const stored = localStorage.getItem(TERMINAL_KEY_CONFIG_STORAGE);
+    return normalizeTerminalKeyConfig(stored ? JSON.parse(stored) : {});
+  } catch (error) {
+    return normalizeTerminalKeyConfig();
+  }
+}
+
+function saveTerminalKeyConfig(config: TerminalKeyConfig) {
+  try {
+    localStorage.setItem(TERMINAL_KEY_CONFIG_STORAGE, JSON.stringify(normalizeTerminalKeyConfig(config)));
+  } catch (error) {
+    showMessage('特殊键配置未能保存到当前浏览器。', 'error');
+  }
+}
+
+function detectedTerminalPlatform(): TerminalEffectivePlatform {
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (/mac|iphone|ipad|ipod/.test(userAgent)) return 'macos';
+  if (/win/.test(userAgent)) return 'windows';
+  return 'linux';
+}
+
+function effectiveTerminalPlatform(profile: TerminalKeyProfile): TerminalEffectivePlatform {
+  return profile === 'auto' ? detectedTerminalPlatform() : profile;
+}
+
+function terminalModifierLabel(action: TerminalModifierAction, config: TerminalKeyConfig) {
+  return action.labels?.[effectiveTerminalPlatform(config.profile)] || action.label;
+}
+
+function terminalModifierTitle(action: TerminalModifierAction, config: TerminalKeyConfig) {
+  return action.titles?.[effectiveTerminalPlatform(config.profile)] || action.title;
+}
+
+function terminalToolbarItems(config: TerminalKeyConfig) {
+  const known = knownTerminalItemKeys();
+  const hidden = new Set(config.hidden);
+  return config.order
+    .filter((key) => known.has(key) && !hidden.has(key))
+    .map(parseTerminalItemKey)
+    .filter((item): item is TerminalToolbarItem => Boolean(item));
+}
+
+function terminalToolbarItemLabel(key: string, config: TerminalKeyConfig) {
+  const item = parseTerminalItemKey(key);
+  if (!item) return key;
+  if (item.type === 'modifier') {
+    const action = TERMINAL_MODIFIER_ACTIONS.find((candidate) => candidate.id === item.id);
+    return action ? terminalModifierLabel(action, config) : item.id;
+  }
+  if (item.type === 'utility') {
+    const action = TERMINAL_UTILITY_ACTIONS.find((candidate) => candidate.id === item.id);
+    return action?.label || item.id;
+  }
+  const action = TERMINAL_KEY_ACTIONS.find((candidate) => candidate.id === item.id);
+  return action?.label || item.id;
+}
 
 route().catch((error) => renderError(error));
 
@@ -505,25 +656,58 @@ async function renderTerminal(ticket: string) {
             <small>SSH WebSocket session</small>
           </div>
           <div class="terminal-actions">
+            <select id="terminalKeyProfile" class="terminal-key-profile" title="特殊键类型">
+              <option value="auto">自动</option>
+              <option value="macos">macOS</option>
+              <option value="windows">Windows</option>
+              <option value="linux">Linux</option>
+            </select>
+            <button id="terminalKeySettingsButton" class="button small ghost" type="button" aria-expanded="false">按键</button>
             <button id="terminalFitButton" class="button small ghost" type="button">适配</button>
             <button id="terminalFullscreenButton" class="button small" type="button">全屏</button>
           </div>
         </div>
+        <div id="terminalKeySettings" class="terminal-key-settings" hidden>
+          <div class="terminal-key-settings-head">
+            <strong>特殊键</strong>
+            <button id="terminalKeyResetButton" class="button small ghost" type="button">恢复默认</button>
+          </div>
+          <div id="terminalKeyOrderList" class="terminal-key-order-list"></div>
+        </div>
         <div id="terminal"></div>
         <div id="mobileTerminalToolbar" class="mobile-terminal-toolbar" aria-label="移动端终端辅助按键">
-          <div class="mobile-terminal-toolbar-row">
-            ${terminalKeyButtons()}
-            <button id="terminalKeyboardButton" class="terminal-key wide" type="button" title="显示或隐藏系统键盘">键盘</button>
+          <div id="mobileTerminalToolbarRow" class="mobile-terminal-toolbar-row">
+            ${terminalKeyButtons(loadTerminalKeyConfig())}
           </div>
         </div>
       </section>
+      <aside id="terminalTextPanel" class="terminal-text-panel">
+        <button id="terminalTextPanelExpand" class="terminal-text-expand-button" type="button" title="展开文本发送区">文本</button>
+        <div class="terminal-text-panel-content">
+          <div class="terminal-text-panel-header">
+            <div>
+              <strong>文本输入</strong>
+              <small>发送到当前光标</small>
+            </div>
+            <button id="terminalTextPanelCollapse" class="button small" type="button">收起</button>
+          </div>
+          <textarea id="terminalTextBuffer" spellcheck="false" placeholder="输入需要键入终端的内容"></textarea>
+          <div class="terminal-text-actions">
+            <button id="terminalTextSend" class="button primary small" type="button">发送</button>
+            <button id="terminalTextSendEnter" class="button small" type="button">发送并回车</button>
+            <button id="terminalTextClear" class="button ghost small" type="button">清空</button>
+          </div>
+        </div>
+      </aside>
     </section>
   `));
 
   document.body.classList.add('terminal-page');
   setupTerminalLayoutControls();
   setupTerminalViewportControls();
+  setupTerminalKeyControls();
   setupTerminalMobileToolbar();
+  setupTerminalTextControls();
 
   const methodSelect = document.querySelector<HTMLSelectElement>('#authMethod');
   methodSelect?.addEventListener('change', () => updateAuthFields(methodSelect.value));
@@ -544,15 +728,121 @@ async function renderTerminal(ticket: string) {
   });
 }
 
-function terminalKeyButtons() {
-  return `
-    ${TERMINAL_MODIFIER_ACTIONS.map((action) => `
-      <button class="terminal-key modifier" type="button" data-terminal-modifier="${action.id}" aria-pressed="false" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
-    `).join('')}
-    ${TERMINAL_KEY_ACTIONS.map((action) => `
+function terminalKeyButtons(config: TerminalKeyConfig) {
+  return terminalToolbarItems(config).map((item) => {
+    if (item.type === 'modifier') {
+      const action = TERMINAL_MODIFIER_ACTIONS.find((candidate) => candidate.id === item.id);
+      if (!action) return '';
+      return `
+        <button class="terminal-key modifier" type="button" data-terminal-modifier="${action.id}" aria-pressed="${terminalModifierState.has(action.id)}" title="${escapeHtml(terminalModifierTitle(action, config))}">${escapeHtml(terminalModifierLabel(action, config))}</button>
+      `;
+    }
+    if (item.type === 'utility') {
+      const action = TERMINAL_UTILITY_ACTIONS.find((candidate) => candidate.id === item.id);
+      if (!action) return '';
+      return `
+        <button class="terminal-key${action.wide ? ' wide' : ''}" type="button" data-terminal-utility="${action.id}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
+      `;
+    }
+    const action = TERMINAL_KEY_ACTIONS.find((candidate) => candidate.id === item.id);
+    if (!action) return '';
+    return `
       <button class="terminal-key${action.wide ? ' wide' : ''}" type="button" data-terminal-key="${action.id}" title="${escapeHtml(action.title)}">${escapeHtml(action.label)}</button>
-    `).join('')}
-  `;
+    `;
+  }).join('');
+}
+
+function terminalKeySettingsRows(config: TerminalKeyConfig) {
+  const hidden = new Set(config.hidden);
+  return config.order.map((key, index) => `
+    <div class="terminal-key-config-row" data-terminal-item="${escapeHtml(key)}">
+      <label class="terminal-key-visible">
+        <input type="checkbox" data-terminal-key-visible="${escapeHtml(key)}" ${hidden.has(key) ? '' : 'checked'} />
+        <span>${escapeHtml(terminalToolbarItemLabel(key, config))}</span>
+      </label>
+      <div class="terminal-key-order-actions">
+        <button class="button small ghost" type="button" data-terminal-key-move="up" ${index === 0 ? 'disabled' : ''}>↑</button>
+        <button class="button small ghost" type="button" data-terminal-key-move="down" ${index === config.order.length - 1 ? 'disabled' : ''}>↓</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function renderTerminalKeyControls(config = loadTerminalKeyConfig()) {
+  const normalized = normalizeTerminalKeyConfig(config);
+  const profileSelect = document.querySelector<HTMLSelectElement>('#terminalKeyProfile');
+  const toolbarRow = document.querySelector<HTMLElement>('#mobileTerminalToolbarRow');
+  const orderList = document.querySelector<HTMLElement>('#terminalKeyOrderList');
+
+  if (profileSelect) profileSelect.value = normalized.profile;
+  if (toolbarRow) toolbarRow.innerHTML = terminalKeyButtons(normalized);
+  if (orderList) orderList.innerHTML = terminalKeySettingsRows(normalized);
+  updateTerminalModifierButtons(toolbarRow || document);
+  scheduleTerminalFit();
+}
+
+function setupTerminalKeyControls() {
+  const settings = document.querySelector<HTMLElement>('#terminalKeySettings');
+  const settingsButton = document.querySelector<HTMLButtonElement>('#terminalKeySettingsButton');
+  const profileSelect = document.querySelector<HTMLSelectElement>('#terminalKeyProfile');
+  const resetButton = document.querySelector<HTMLButtonElement>('#terminalKeyResetButton');
+  const orderList = document.querySelector<HTMLElement>('#terminalKeyOrderList');
+
+  renderTerminalKeyControls();
+
+  settingsButton?.addEventListener('click', () => {
+    if (!settings) return;
+    const hidden = !settings.hidden;
+    settings.hidden = hidden;
+    settingsButton.setAttribute('aria-expanded', String(!hidden));
+    scheduleTerminalFit();
+  });
+
+  profileSelect?.addEventListener('change', () => {
+    const config = loadTerminalKeyConfig();
+    config.profile = isTerminalKeyProfile(profileSelect.value) ? profileSelect.value : 'auto';
+    saveTerminalKeyConfig(config);
+    renderTerminalKeyControls(config);
+  });
+
+  resetButton?.addEventListener('click', () => {
+    const config = normalizeTerminalKeyConfig();
+    saveTerminalKeyConfig(config);
+    renderTerminalKeyControls(config);
+  });
+
+  orderList?.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('[data-terminal-key-move]');
+    const row = button?.closest<HTMLElement>('[data-terminal-item]');
+    if (!button || !row?.dataset.terminalItem) return;
+
+    const config = loadTerminalKeyConfig();
+    const currentIndex = config.order.indexOf(row.dataset.terminalItem);
+    const offset = button.dataset.terminalKeyMove === 'up' ? -1 : 1;
+    const nextIndex = currentIndex + offset;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= config.order.length) return;
+
+    const [item] = config.order.splice(currentIndex, 1);
+    config.order.splice(nextIndex, 0, item);
+    saveTerminalKeyConfig(config);
+    renderTerminalKeyControls(config);
+  });
+
+  orderList?.addEventListener('change', (event) => {
+    const checkbox = (event.target as HTMLElement | null)?.closest<HTMLInputElement>('[data-terminal-key-visible]');
+    if (!checkbox?.dataset.terminalKeyVisible) return;
+
+    const config = loadTerminalKeyConfig();
+    const hidden = new Set(config.hidden);
+    if (checkbox.checked) {
+      hidden.delete(checkbox.dataset.terminalKeyVisible);
+    } else {
+      hidden.add(checkbox.dataset.terminalKeyVisible);
+    }
+    config.hidden = Array.from(hidden);
+    saveTerminalKeyConfig(config);
+    renderTerminalKeyControls(config);
+  });
 }
 
 function updateAuthFields(method: string) {
@@ -678,33 +968,98 @@ function setupTerminalMobileToolbar() {
     event.preventDefault();
   });
 
-  for (const button of toolbar.querySelectorAll<HTMLButtonElement>('[data-terminal-key]')) {
-    button.addEventListener('click', () => {
+  toolbar.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement | null)?.closest<HTMLButtonElement>('button');
+    if (!button || !toolbar.contains(button)) return;
+
+    if (button.dataset.terminalKey) {
       const action = TERMINAL_KEY_ACTIONS.find((item) => item.id === button.dataset.terminalKey);
       if (!action) return;
       const data = action.useModifiers === false ? consumeTerminalModifiers(action.data) : applyTerminalModifiers(action.data);
       activeTerminalInput?.(data);
       activeTerminalFocus?.();
-    });
-  }
+      return;
+    }
 
-  for (const button of toolbar.querySelectorAll<HTMLButtonElement>('[data-terminal-modifier]')) {
-    button.addEventListener('click', () => {
+    if (button.dataset.terminalModifier) {
       const modifier = button.dataset.terminalModifier as TerminalModifier | undefined;
       if (!modifier) return;
       toggleTerminalModifier(modifier, toolbar);
       activeTerminalFocus?.();
-    });
-  }
-
-  document.querySelector<HTMLButtonElement>('#terminalKeyboardButton')?.addEventListener('click', () => {
-    const terminalElement = document.querySelector<HTMLElement>('#terminal .xterm');
-    if (terminalElement && document.activeElement && terminalElement.contains(document.activeElement)) {
-      activeTerminalBlur?.();
       return;
     }
-    activeTerminalFocus?.();
+
+    if (button.dataset.terminalUtility === 'keyboard') {
+      const terminalElement = document.querySelector<HTMLElement>('#terminal .xterm');
+      if (terminalElement && document.activeElement && terminalElement.contains(document.activeElement)) {
+        activeTerminalBlur?.();
+        return;
+      }
+      activeTerminalFocus?.();
+    }
   });
+}
+
+function setupTerminalTextControls() {
+  const shell = document.querySelector<HTMLElement>('#terminalShell');
+  const collapseButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelCollapse');
+  const expandButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelExpand');
+  const textarea = document.querySelector<HTMLTextAreaElement>('#terminalTextBuffer');
+  const sendButton = document.querySelector<HTMLButtonElement>('#terminalTextSend');
+  const sendEnterButton = document.querySelector<HTMLButtonElement>('#terminalTextSendEnter');
+  const clearButton = document.querySelector<HTMLButtonElement>('#terminalTextClear');
+  if (!shell || !textarea) return;
+
+  const setCollapsed = (collapsed: boolean) => {
+    shell.classList.toggle('text-collapsed', collapsed);
+    collapseButton?.setAttribute('aria-expanded', String(!collapsed));
+    expandButton?.setAttribute('aria-expanded', String(!collapsed));
+    scheduleTerminalFit();
+  };
+
+  collapseButton?.addEventListener('click', () => setCollapsed(true));
+  expandButton?.addEventListener('click', () => setCollapsed(false));
+
+  sendButton?.addEventListener('click', () => {
+    sendTerminalText(textarea.value, false);
+  });
+
+  sendEnterButton?.addEventListener('click', () => {
+    sendTerminalText(textarea.value, true);
+  });
+
+  clearButton?.addEventListener('click', () => {
+    textarea.value = '';
+    textarea.focus();
+  });
+}
+
+function sendTerminalText(value: string, appendEnter: boolean) {
+  if (!value && !appendEnter) return;
+  if (!activeTerminalInput) {
+    showMessage('请先连接 SSH 终端。', 'error');
+    return;
+  }
+
+  const data = normalizeTerminalText(value) + (appendEnter ? '\r' : '');
+  sendTerminalInputInChunks(data);
+  activeTerminalFocus?.();
+  showMessage('文本已发送到终端');
+}
+
+function normalizeTerminalText(value: string) {
+  return value
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n/g, '\r');
+}
+
+function sendTerminalInputInChunks(data: string) {
+  const chunkSize = 4096;
+  for (let index = 0; index < data.length; index += chunkSize) {
+    const chunk = data.slice(index, index + chunkSize);
+    window.setTimeout(() => activeTerminalInput?.(chunk), Math.floor(index / chunkSize) * 8);
+  }
 }
 
 function toggleTerminalModifier(modifier: TerminalModifier, toolbar?: ParentNode | null) {
@@ -745,7 +1100,7 @@ function applyTerminalModifiers(data: string) {
 }
 
 function modifiedTerminalData(data: string) {
-  const hasAlt = terminalModifierState.has('alt');
+  const hasAlt = terminalModifierState.has('alt') || terminalModifierState.has('meta');
   const hasCtrl = terminalModifierState.has('ctrl');
   const hasShift = terminalModifierState.has('shift');
   const modifierCode = terminalModifierCode();
@@ -775,7 +1130,7 @@ function modifiedTerminalData(data: string) {
 function terminalModifierCode() {
   return 1
     + (terminalModifierState.has('shift') ? 1 : 0)
-    + (terminalModifierState.has('alt') ? 2 : 0)
+    + (terminalModifierState.has('alt') || terminalModifierState.has('meta') ? 2 : 0)
     + (terminalModifierState.has('ctrl') ? 4 : 0);
 }
 
@@ -889,7 +1244,8 @@ function setupTerminalLayoutControls() {
 
   const setConnectWidth = (clientX: number) => {
     const rect = shell.getBoundingClientRect();
-    const max = Math.max(280, rect.width - 420);
+    const textReserve = shell.classList.contains('text-collapsed') ? 70 : 330;
+    const max = Math.max(280, rect.width - textReserve - 420);
     const width = clamp(clientX - rect.left, 240, Math.min(560, max));
     shell.style.setProperty('--connect-panel-width', `${width}px`);
     scheduleTerminalFit();

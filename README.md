@@ -26,7 +26,8 @@ TermLens is designed around a few practical principles:
 
 - 🖥️ Browser-based SSH terminal powered by xterm.js.
 - 📐 Collapsible connection panel, resizable terminal layout, native fullscreen, and Safari-friendly immersive fullscreen fallback.
-- 📱 RustDesk-style mobile helper toolbar with one-shot `Ctrl`/`Alt`/`Shift`, function keys, navigation keys, shell symbols, and soft-keyboard-aware sizing.
+- 📱 RustDesk-style mobile helper toolbar with one-shot modifiers, platform-aware `Cmd`/`Win` labels, reorderable/hidden keys, function keys, navigation keys, shell symbols, and soft-keyboard-aware sizing.
+- 📝 Side text input panel for sending prepared text into the current terminal cursor position.
 - 👥 Admin-managed users, roles, SSH targets, and per-target permissions.
 - 📋 Admin access-link actions for copying or copying-and-opening generated links.
 - 🔗 Random per-user access links before login and terminal launch.
@@ -108,11 +109,12 @@ sequenceDiagram
   -> 🧑‍💻 Browser terminal session
 ```
 
-The terminal page has two main areas:
+The terminal page has three main areas:
 
 - 🧾 **Connection panel**: target summary, SSH auth method, password/private-key fields, collapse control.
 - ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, native fullscreen, and immersive fullscreen fallback for mobile Safari.
-- 📱 **Mobile helper toolbar**: RustDesk-style one-shot `Ctrl`/`Alt`/`Shift`, common `Ctrl` shortcuts, `F1`-`F12`, navigation keys, and shell symbols that mobile keyboards often hide or omit.
+- 📱 **Mobile helper toolbar**: RustDesk-style one-shot modifiers, platform-aware `Cmd`/`Win` labels, configurable order/visibility, common `Ctrl` shortcuts, `F1`-`F12`, navigation keys, and shell symbols.
+- 📝 **Text input panel**: collapsible side panel for preparing text and sending it into the current terminal cursor position.
 
 ## 🛡️ Security Model
 
@@ -278,9 +280,10 @@ Store the generated password and access URL securely. Rotate the password and ac
 2. 🔑 Log in with password and TOTP. First login may require scanning a QR code.
 3. 🖥️ Choose an authorized SSH target.
 4. ⌨️ Enter SSH password or private key for the current connection.
-5. 📱 On mobile, use the helper toolbar for one-shot modifiers, function keys, navigation keys, and symbols that the system keyboard hides.
-6. 📐 Collapse the connection panel, resize the terminal, or enter fullscreen mode as needed.
-7. 🚪 Close the terminal and log out when finished.
+5. 📱 On mobile, choose the key profile and arrange or hide helper keys as needed.
+6. 📝 Use the text input panel to send prepared text to the current terminal cursor position.
+7. 📐 Collapse the connection panel, resize the terminal, or enter fullscreen mode as needed.
+8. 🚪 Close the terminal and log out when finished.
 
 ## 🚧 Limitations
 

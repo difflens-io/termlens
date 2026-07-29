@@ -13,8 +13,10 @@ Mobile and tablet devices often lack terminal-friendly keys on the system keyboa
 Implemented improvements:
 
 - 📱 Mobile-only terminal helper toolbar.
-- ⌨️ One-shot `Ctrl`, `Alt`, and `Shift` modifier keys that apply to the next helper key or system-keyboard input.
+- ⌨️ One-shot `Ctrl`, `Alt`, `Shift`, and platform-aware `Cmd`/`Win` modifier keys that apply to the next helper key or system-keyboard input.
 - 🎛️ Quick keys for `Esc`, `Tab`, `Enter`, `Backspace`, `Delete`, arrow keys, `Home`, `End`, `PgUp`, `PgDn`, `F1`-`F12`, and common `Ctrl` combinations.
+- 🧰 Local helper-key customization for key profile, ordering, and visibility.
+- 📝 Collapsible side text input panel for sending prepared text into the terminal cursor.
 - 🔣 Quick symbols for common shell input such as `|`, `~`, `/`, `-`, and `_`.
 - 👆 Pointer handling that keeps terminal focus while tapping helper keys.
 - 📐 `visualViewport`-aware terminal sizing to reduce soft-keyboard overlap.
