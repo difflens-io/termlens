@@ -97,6 +97,10 @@ const TERMINAL_KEY_ACTIONS: TerminalKeyAction[] = [
   { id: 'ctrl-alt-del', label: 'Ctrl+Alt+Del', data: '\x1b[3;7~', title: 'Ctrl+Alt+Del', wide: true, useModifiers: false },
   { id: 'esc', label: 'Esc', data: '\x1b', title: 'Escape' },
   { id: 'tab', label: 'Tab', data: '\t', title: 'Tab' },
+  { id: 'vim-insert', label: 'Vim i', data: 'i', title: 'Vim insert mode', wide: true, useModifiers: false },
+  { id: 'vim-command', label: 'Vim :', data: '\x1b:', title: 'Vim command mode', wide: true, useModifiers: false },
+  { id: 'vim-save-quit', label: ':wq', data: '\x1b:wq\r', title: 'Vim save and quit', useModifiers: false },
+  { id: 'vim-quit-force', label: ':q!', data: '\x1b:q!\r', title: 'Vim quit without saving', useModifiers: false },
   { id: 'ctrl-a', label: 'Ctrl+A', data: '\x01', title: 'Ctrl+A', useModifiers: false },
   { id: 'ctrl-c', label: 'Ctrl+C', data: '\x03', title: 'Ctrl+C', useModifiers: false },
   { id: 'ctrl-d', label: 'Ctrl+D', data: '\x04', title: 'Ctrl+D', useModifiers: false },
@@ -233,8 +237,24 @@ function normalizeTerminalKeyConfig(value: Partial<TerminalKeyConfig> = {}): Ter
   for (const key of Array.isArray(value.order) ? value.order : []) {
     if (known.has(key) && !order.includes(key)) order.push(key);
   }
-  for (const key of defaultOrder) {
-    if (!order.includes(key)) order.push(key);
+  for (let defaultIndex = 0; defaultIndex < defaultOrder.length; defaultIndex += 1) {
+    const key = defaultOrder[defaultIndex];
+    if (order.includes(key)) continue;
+
+    let insertAt = -1;
+    for (let previousIndex = defaultIndex - 1; previousIndex >= 0; previousIndex -= 1) {
+      const existingIndex = order.indexOf(defaultOrder[previousIndex]);
+      if (existingIndex >= 0) {
+        insertAt = existingIndex + 1;
+        break;
+      }
+    }
+
+    if (insertAt >= 0) {
+      order.splice(insertAt, 0, key);
+    } else {
+      order.push(key);
+    }
   }
 
   const hidden = Array.isArray(value.hidden)
@@ -781,6 +801,36 @@ function renderTerminalKeyControls(config = loadTerminalKeyConfig()) {
   scheduleTerminalFit();
 }
 
+function isCompactTerminalLayout() {
+  return window.matchMedia('(max-width: 880px)').matches;
+}
+
+function setTerminalConnectPanelCollapsed(collapsed: boolean) {
+  const shell = document.querySelector<HTMLElement>('#terminalShell');
+  const collapseButton = document.querySelector<HTMLButtonElement>('#connectPanelCollapse');
+  const expandButton = document.querySelector<HTMLButtonElement>('#connectPanelExpand');
+  if (!shell) return;
+  shell.classList.toggle('connect-collapsed', collapsed);
+  collapseButton?.setAttribute('aria-expanded', String(!collapsed));
+  expandButton?.setAttribute('aria-expanded', String(!collapsed));
+  scheduleTerminalFit();
+}
+
+function setTerminalTextPanelCollapsed(collapsed: boolean) {
+  const shell = document.querySelector<HTMLElement>('#terminalShell');
+  const collapseButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelCollapse');
+  const expandButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelExpand');
+  if (!shell) return;
+  shell.classList.toggle('text-collapsed', collapsed);
+  collapseButton?.setAttribute('aria-expanded', String(!collapsed));
+  expandButton?.setAttribute('aria-expanded', String(!collapsed));
+  scheduleTerminalFit();
+}
+
+function setTerminalSessionActive(active: boolean) {
+  document.querySelector<HTMLElement>('#terminalShell')?.classList.toggle('terminal-session-active', active);
+}
+
 function setupTerminalKeyControls() {
   const settings = document.querySelector<HTMLElement>('#terminalKeySettings');
   const settingsButton = document.querySelector<HTMLButtonElement>('#terminalKeySettingsButton');
@@ -861,6 +911,12 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
     (node as HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement | HTMLSelectElement).disabled = true;
   });
 
+  setTerminalSessionActive(true);
+  if (isCompactTerminalLayout()) {
+    setTerminalConnectPanelCollapsed(true);
+    setTerminalTextPanelCollapsed(true);
+  }
+
   const term = new Terminal({
     cursorBlink: true,
     convertEol: true,
@@ -875,7 +931,12 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.open(terminalNode);
+  configureTerminalHelperTextarea();
   term.writeln('Connecting...');
+  terminalNode.addEventListener('pointerdown', () => {
+    term.focus();
+    configureTerminalHelperTextarea();
+  });
 
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${protocol}//${location.host}${BASE_PATH}ws/terminal?ticket=${encodeURIComponent(ticket)}`);
@@ -890,7 +951,10 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
   };
 
   activeTerminalFit = fitAndSendSize;
-  activeTerminalFocus = () => term.focus();
+  activeTerminalFocus = () => {
+    term.focus();
+    configureTerminalHelperTextarea();
+  };
   activeTerminalBlur = () => document.querySelector<HTMLElement>('#terminal .xterm-helper-textarea')?.blur();
   scheduleTerminalFit();
   if (terminalPanel && 'ResizeObserver' in window) {
@@ -918,10 +982,16 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
       terminalReady = true;
       showMessage('SSH 终端已连接');
       term.clear();
+      activeTerminalFocus?.();
+      if (isCompactTerminalLayout()) {
+        setTerminalConnectPanelCollapsed(true);
+        setTerminalTextPanelCollapsed(true);
+      }
     }
     if (message.type === 'error') {
       showMessage(message.message, 'error');
       term.writeln(`\r\n${message.message}`);
+      if (isCompactTerminalLayout()) setTerminalConnectPanelCollapsed(false);
     }
     if (message.type === 'closed') term.writeln('\r\nSession closed.');
   });
@@ -932,11 +1002,13 @@ function startTerminal(ticket: string, auth: Record<string, string>) {
       : 'WebSocket 连接失败，请检查登录状态、目标权限或重新打开终端。';
     showMessage(message, 'error');
     term.writeln(`\r\n${message}`);
+    if (isCompactTerminalLayout()) setTerminalConnectPanelCollapsed(false);
   });
 
   ws.addEventListener('close', () => {
     if (!terminalReady) {
       showMessage('终端未能建立连接，请返回目标列表重新打开终端。', 'error');
+      if (isCompactTerminalLayout()) setTerminalConnectPanelCollapsed(false);
     }
     term.writeln('\r\nDisconnected.');
   });
@@ -1001,24 +1073,18 @@ function setupTerminalMobileToolbar() {
 }
 
 function setupTerminalTextControls() {
-  const shell = document.querySelector<HTMLElement>('#terminalShell');
   const collapseButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelCollapse');
   const expandButton = document.querySelector<HTMLButtonElement>('#terminalTextPanelExpand');
   const textarea = document.querySelector<HTMLTextAreaElement>('#terminalTextBuffer');
   const sendButton = document.querySelector<HTMLButtonElement>('#terminalTextSend');
   const sendEnterButton = document.querySelector<HTMLButtonElement>('#terminalTextSendEnter');
   const clearButton = document.querySelector<HTMLButtonElement>('#terminalTextClear');
-  if (!shell || !textarea) return;
+  if (!textarea) return;
 
-  const setCollapsed = (collapsed: boolean) => {
-    shell.classList.toggle('text-collapsed', collapsed);
-    collapseButton?.setAttribute('aria-expanded', String(!collapsed));
-    expandButton?.setAttribute('aria-expanded', String(!collapsed));
-    scheduleTerminalFit();
-  };
+  if (isCompactTerminalLayout()) setTerminalTextPanelCollapsed(true);
 
-  collapseButton?.addEventListener('click', () => setCollapsed(true));
-  expandButton?.addEventListener('click', () => setCollapsed(false));
+  collapseButton?.addEventListener('click', () => setTerminalTextPanelCollapsed(true));
+  expandButton?.addEventListener('click', () => setTerminalTextPanelCollapsed(false));
 
   sendButton?.addEventListener('click', () => {
     sendTerminalText(textarea.value, false);
@@ -1044,6 +1110,7 @@ function sendTerminalText(value: string, appendEnter: boolean) {
   const data = normalizeTerminalText(value) + (appendEnter ? '\r' : '');
   sendTerminalInputInChunks(data);
   activeTerminalFocus?.();
+  if (isCompactTerminalLayout()) setTerminalTextPanelCollapsed(true);
   showMessage('文本已发送到终端');
 }
 
@@ -1052,6 +1119,15 @@ function normalizeTerminalText(value: string) {
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/\n/g, '\r');
+}
+
+function configureTerminalHelperTextarea() {
+  const helper = document.querySelector<HTMLTextAreaElement>('#terminal .xterm-helper-textarea');
+  if (!helper) return;
+  helper.autocomplete = 'off';
+  helper.autocapitalize = 'none';
+  helper.spellcheck = false;
+  helper.setAttribute('autocorrect', 'off');
 }
 
 function sendTerminalInputInChunks(data: string) {

@@ -27,6 +27,7 @@ TermLens is designed around a few practical principles:
 - 🖥️ Browser-based SSH terminal powered by xterm.js.
 - 📐 Collapsible connection panel, resizable terminal layout, native fullscreen, and Safari-friendly immersive fullscreen fallback.
 - 📱 RustDesk-style mobile helper toolbar with one-shot modifiers, platform-aware `Cmd`/`Win` labels, reorderable/hidden keys, function keys, navigation keys, shell symbols, and soft-keyboard-aware sizing.
+- ✍️ Mobile Vim helpers for insert mode, command mode, save-and-quit, and force-quit actions.
 - 📝 Side text input panel for sending prepared text into the current terminal cursor position.
 - 👥 Admin-managed users, roles, SSH targets, and per-target permissions.
 - 📋 Admin access-link actions for copying or copying-and-opening generated links.
@@ -114,7 +115,7 @@ The terminal page has three main areas:
 - 🧾 **Connection panel**: target summary, SSH auth method, password/private-key fields, collapse control.
 - ⌨️ **Terminal panel**: xterm.js terminal, fit button, resize-aware layout, native fullscreen, and immersive fullscreen fallback for mobile Safari.
 - 📱 **Mobile helper toolbar**: RustDesk-style one-shot modifiers, platform-aware `Cmd`/`Win` labels, configurable order/visibility, common `Ctrl` shortcuts, `F1`-`F12`, navigation keys, and shell symbols.
-- 📝 **Text input panel**: collapsible side panel for preparing text and sending it into the current terminal cursor position.
+- 📝 **Text input panel**: collapsible side panel for preparing text and sending it into the current terminal cursor position. On mobile, side panels collapse automatically after terminal connection to keep the shell visible.
 
 ## 🛡️ Security Model
 

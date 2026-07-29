@@ -720,33 +720,85 @@ body.terminal-immersive-active {
     flex-direction: column;
     gap: 8px;
     height: calc(var(--terminal-viewport-height, 100vh) - 20px);
+    position: relative;
   }
 
   .terminal-page .terminal-panel-header {
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
     gap: 8px;
+    min-height: 40px;
+    padding: 6px 8px;
+  }
+
+  .terminal-page .terminal-panel-header small {
+    display: none;
   }
 
   .terminal-page .terminal-actions {
-    flex-wrap: wrap;
-    width: 100%;
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .terminal-page .terminal-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .terminal-page .terminal-actions .button {
+    flex: 0 0 auto;
+    min-height: 28px;
+    padding-right: 8px;
+    padding-left: 8px;
   }
 
   .terminal-page .terminal-key-profile {
-    flex: 1 1 110px;
+    flex: 0 0 86px;
+    min-height: 28px;
     min-width: 0;
   }
 
   .terminal-page .connect-panel {
     flex: 0 0 auto;
-    max-height: 45vh;
+    max-height: 34vh;
     overflow-y: auto;
-    padding: 12px;
+    padding: 10px;
+  }
+
+  .terminal-page .connect-panel-header {
+    margin-bottom: 8px;
+  }
+
+  .terminal-page .connect-panel-header h1 {
+    font-size: 18px;
+  }
+
+  .terminal-page .connect-panel .muted,
+  .terminal-page .connect-panel label span {
+    font-size: 12px;
+  }
+
+  .terminal-page #connectForm {
+    gap: 8px;
   }
 
   .terminal-page .terminal-shell.connect-collapsed .connect-panel {
     max-height: 42px;
     padding: 0;
+  }
+
+  .terminal-page .terminal-shell.terminal-session-active.connect-collapsed .connect-panel {
+    position: absolute;
+    top: 50px;
+    left: 8px;
+    z-index: 20;
+    width: 54px;
+    height: 36px;
+    max-height: none;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
   }
 
   .terminal-page .terminal-shell.connect-collapsed .connect-expand-button {
@@ -760,13 +812,29 @@ body.terminal-immersive-active {
 
   .terminal-page .terminal-text-panel {
     flex: 0 0 auto;
-    max-height: 28vh;
+    max-height: 24vh;
     padding: 10px;
   }
 
   .terminal-page .terminal-shell.text-collapsed .terminal-text-panel {
     max-height: 42px;
     padding: 0;
+  }
+
+  .terminal-page .terminal-shell.text-collapsed .terminal-text-panel {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    z-index: 20;
+    width: 54px;
+    height: 36px;
+    max-height: none;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+  }
+
+  .terminal-page .terminal-shell.terminal-session-active.text-collapsed .terminal-text-panel {
+    top: 50px;
+    bottom: auto;
   }
 
   .terminal-page .terminal-shell.text-collapsed .terminal-text-expand-button {
@@ -778,7 +846,7 @@ body.terminal-immersive-active {
   }
 
   .terminal-page #terminalTextBuffer {
-    min-height: 74px;
+    min-height: 62px;
   }
 
   .terminal-page .terminal-text-actions {
