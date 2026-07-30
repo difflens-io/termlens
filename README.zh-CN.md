@@ -35,6 +35,7 @@ TermLens 围绕几个务实原则设计：
 - 🔑 强制密码 + TOTP 双因子验证，首次登录通过二维码设置 TOTP。
 - 🎟️ 打开终端前必须获取短期一次性 terminal ticket。
 - 🛡️ 终端输入转发到 SSH 前会检查登录会话、访问链接、目标权限和 ticket。
+- ⏱️ 管理后台可配置终端空闲超时，并支持基于活跃输入/输出自动续期。
 - 🚫 远程 SSH 密码和私钥只在当前连接中使用，不写入数据库。
 - 📵 不内置统计上报，也不持久化终端输出。
 - 🛰️ 可选私有终端中继模块，用于没有公网 IP 的电脑，通过本地主动出站 Agent 安全接入。
@@ -193,6 +194,9 @@ npm run init-admin
 | `TERMLENS_COOKIE_SECURE` | HTTPS 部署时设置为 `true`。 |
 | `TERMLENS_SESSION_TTL_SECONDS` | 浏览器登录会话有效期。 |
 | `TERMLENS_TICKET_TTL_SECONDS` | terminal ticket 有效期。 |
+| `TERMLENS_TERMINAL_IDLE_TIMEOUT_ENABLED` | 是否启用终端空闲自动断开，默认 `true`。 |
+| `TERMLENS_TERMINAL_ACTIVITY_RENEWAL_ENABLED` | 终端有输入、resize 或 SSH 输出时是否自动续期，默认 `true`。 |
+| `TERMLENS_TERMINAL_IDLE_TIMEOUT_SECONDS` | 终端空闲超时窗口，默认跟浏览器 session 一致，未修改时为 8 小时。 |
 | `TERMLENS_SECRET_KEY` | 敏感信息加密密钥，必填。 |
 | `TERMLENS_PRIVATE_RELAY_ENABLED` | 启用可选私有终端中继模块，默认 `false`。 |
 | `TERMLENS_PRIVATE_RELAY_ALLOW_NON_LOOPBACK` | 允许私有 Agent 转发非 loopback 本地地址，默认 `false`。 |
@@ -281,6 +285,8 @@ sudo systemctl status termlens.service
 - 🧱 TermLens 只绑定 `127.0.0.1`，不要直接暴露公开网卡。
 - 🌐 条件允许时增加 VPN、IP 白名单或代理鉴权。
 - ⏱️ terminal ticket 需要给用户输入 SSH 凭据留出合理时间，默认有效期为 10 分钟。
+- ⏱️ 终端空闲超时默认 8 小时；开启活跃续期时，正在输入、resize 或有远端输出的终端会持续续期，不再按固定 8 小时墙钟时间断开。
+- 🛡️ 关闭空闲主动断开不会绕过登录 session 过期、访问链接校验或目标权限吊销。
 - 🔁 用户离开或链接可能泄露时，及时轮换访问链接。
 
 ### 6. 初始化管理员

@@ -21,6 +21,7 @@ Initial public release.
 - Added platform-aware `Cmd`/`Win` terminal key labels, configurable helper-key order/visibility, and a side text input panel for sending prepared text to the terminal cursor.
 - Added mobile terminal-first layout behavior and Vim helper actions for insert mode, command mode, save-and-quit, and force-quit.
 - Added an optional private endpoint relay module with admin-managed endpoints, one-time Agent enrollment, per-user private endpoint permissions, and loopback-only Agent forwarding by default.
+- Added admin-configurable terminal idle timeout and activity-based session renewal so active terminals do not disconnect at a fixed wall-clock limit.
 - Added Safari-friendly terminal immersive fullscreen fallback.
 - Added copy and copy-and-open actions for generated admin access links.
 - Added systemd and nginx deployment examples.

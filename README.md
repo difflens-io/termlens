@@ -35,6 +35,7 @@ TermLens is designed around a few practical principles:
 - 🔑 Mandatory password + TOTP authentication with QR-code enrollment.
 - 🎟️ Short-lived one-time terminal tickets before WebSocket connection.
 - 🛡️ Session, access-link, target-permission, and ticket checks before terminal input is forwarded to SSH.
+- ⏱️ Admin-configurable terminal idle timeout with activity-based session renewal.
 - 🚫 Remote SSH passwords and private keys are used only for the current connection and are not stored.
 - 📵 No application telemetry and no terminal-output persistence.
 - 🛰️ Optional private endpoint relay for computers without public IP addresses, implemented as an opt-in module with a local outbound Agent.
@@ -193,6 +194,9 @@ See [.env.example](.env.example) for all supported environment variables.
 | `TERMLENS_COOKIE_SECURE` | Set to `true` when served over HTTPS. |
 | `TERMLENS_SESSION_TTL_SECONDS` | Browser login session lifetime. |
 | `TERMLENS_TICKET_TTL_SECONDS` | Terminal ticket lifetime. |
+| `TERMLENS_TERMINAL_IDLE_TIMEOUT_ENABLED` | Enables terminal idle disconnects. Defaults to `true`. |
+| `TERMLENS_TERMINAL_ACTIVITY_RENEWAL_ENABLED` | Extends the terminal session while input, resize, or SSH output is active. Defaults to `true`. |
+| `TERMLENS_TERMINAL_IDLE_TIMEOUT_SECONDS` | Terminal idle timeout window. Defaults to the browser session lifetime, currently 8 hours unless changed. |
 | `TERMLENS_SECRET_KEY` | Required encryption key for sensitive values. |
 | `TERMLENS_PRIVATE_RELAY_ENABLED` | Enables the optional private endpoint relay module. Defaults to `false`. |
 | `TERMLENS_PRIVATE_RELAY_ALLOW_NON_LOOPBACK` | Allows private Agents to forward non-loopback local hosts. Defaults to `false`. |
@@ -281,6 +285,8 @@ Recommended production posture:
 - 🧱 Bind TermLens to `127.0.0.1`, not a public interface.
 - 🌐 Add VPN, IP allowlist, or proxy auth when possible.
 - ⏱️ Keep terminal tickets long enough for SSH credential entry; the default is 10 minutes.
+- ⏱️ Terminal idle timeout defaults to 8 hours. With activity renewal enabled, active terminal sessions keep extending instead of disconnecting at a fixed 8-hour wall-clock limit.
+- 🛡️ Disabling idle disconnect does not bypass login-session expiry, access-link checks, or target-permission revocation.
 - 🔁 Rotate access links when users leave or links may have been exposed.
 
 ### 6. Bootstrap Admin

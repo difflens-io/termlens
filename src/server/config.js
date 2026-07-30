@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
+const DEFAULT_SESSION_TTL_SECONDS = 8 * 60 * 60;
 
 function normalizeBasePath(value) {
   let basePath = value || '/project/termlens/';
@@ -25,6 +26,8 @@ function booleanFromEnv(name, fallback = false) {
   return raw === 'true' || raw === '1';
 }
 
+const sessionTtlSeconds = numberFromEnv('TERMLENS_SESSION_TTL_SECONDS', DEFAULT_SESSION_TTL_SECONDS);
+
 export const config = {
   projectRoot,
   distDir: path.resolve(projectRoot, 'dist/client'),
@@ -36,7 +39,7 @@ export const config = {
   port: numberFromEnv('TERMLENS_PORT', numberFromEnv('PORT', 7682)),
   basePath: normalizeBasePath(process.env.TERMLENS_BASE_PATH),
   publicUrl: process.env.TERMLENS_PUBLIC_URL || '',
-  sessionTtlSeconds: numberFromEnv('TERMLENS_SESSION_TTL_SECONDS', 8 * 60 * 60),
+  sessionTtlSeconds,
   ticketTtlSeconds: numberFromEnv('TERMLENS_TICKET_TTL_SECONDS', 10 * 60),
   mfaEnrollmentTtlSeconds: numberFromEnv('TERMLENS_MFA_ENROLLMENT_TTL_SECONDS', 10 * 60),
   cookieName: process.env.TERMLENS_COOKIE_NAME || 'tl_session',
@@ -51,6 +54,11 @@ export const config = {
     agentHeartbeatSeconds: numberFromEnv('TERMLENS_PRIVATE_RELAY_AGENT_HEARTBEAT_SECONDS', 30),
     maxStreamsPerAgent: numberFromEnv('TERMLENS_PRIVATE_RELAY_MAX_STREAMS_PER_AGENT', 4),
     streamOpenTimeoutSeconds: numberFromEnv('TERMLENS_PRIVATE_RELAY_STREAM_OPEN_TIMEOUT_SECONDS', 15)
+  },
+  terminal: {
+    idleTimeoutEnabled: booleanFromEnv('TERMLENS_TERMINAL_IDLE_TIMEOUT_ENABLED', true),
+    activityRenewalEnabled: booleanFromEnv('TERMLENS_TERMINAL_ACTIVITY_RENEWAL_ENABLED', true),
+    idleTimeoutSeconds: numberFromEnv('TERMLENS_TERMINAL_IDLE_TIMEOUT_SECONDS', sessionTtlSeconds)
   }
 };
 

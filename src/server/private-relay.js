@@ -297,7 +297,7 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
       return publicPrivateEndpoint(endpoint, agents);
     },
 
-    async startSshSession(ws, req, auth, endpoint, sshAuth, size, assignSession) {
+    async startSshSession(ws, req, auth, endpoint, sshAuth, size, assignSession, recordActivity = () => {}) {
       const agent = agents.get(endpoint.id);
       if (!agent || !agent.isOpen()) {
         ws.send(JSON.stringify({ type: 'error', message: '私有终端 Agent 不在线，请先在本地电脑启动 Agent。' }));
@@ -314,7 +314,7 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
         return;
       }
 
-      startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession);
+      startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession, recordActivity);
     },
 
     onlineEndpointIds() {
@@ -598,7 +598,7 @@ function publicPrivateEndpoint(endpoint, agents) {
   };
 }
 
-function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession) {
+function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession, recordActivity = () => {}) {
   const client = new SshClient();
   const connectConfig = {
     sock: relayStream,
@@ -617,6 +617,7 @@ function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, 
 
   client
     .on('ready', () => {
+      recordActivity();
       audit({ userId: auth.user.id, type: 'private_ssh_connected', details: { endpointId: endpoint.id }, req });
       client.shell(
         {
@@ -635,11 +636,13 @@ function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, 
           assignSession(client, shellStream);
           ws.send(JSON.stringify({ type: 'ready' }));
           shellStream.on('data', (data) => {
+            recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
             }
           });
           shellStream.stderr.on('data', (data) => {
+            recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
             }

@@ -31,6 +31,7 @@ import {
   verifyTotp
 } from './security.js';
 import { createPrivateRelay } from './private-relay.js';
+import { createTerminalSettingsStore } from './terminal-settings.js';
 
 if (!config.secretKey) {
   throw new Error('TERMLENS_SECRET_KEY must be set before starting TermLens.');
@@ -40,6 +41,8 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 const loginAttempts = new Map();
+const TERMINAL_ACTIVITY_TOUCH_INTERVAL_MS = 30_000;
+const TERMINAL_IDLE_CHECK_INTERVAL_MS = 30_000;
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -71,6 +74,7 @@ app.get(mountPath, (req, res, next) => {
 const router = express.Router();
 app.use(mountPath, router);
 const privateRelay = createPrivateRelay({ config, db, audit, mountPath });
+const terminalSettingsStore = createTerminalSettingsStore({ config, db, nowIso });
 
 router.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -277,6 +281,16 @@ router.get('/api/admin/users', requireAdmin, (_req, res) => {
     ORDER BY created_at DESC
   `).all();
   res.json({ users, links });
+});
+
+router.get('/api/admin/settings/terminal', requireAdmin, (_req, res) => {
+  res.json({ settings: terminalSettingsStore.get({ force: true }) });
+});
+
+router.put('/api/admin/settings/terminal', requireAdmin, (req, res) => {
+  const settings = terminalSettingsStore.set(req.body || {});
+  audit({ userId: req.auth.user.id, type: 'admin_terminal_settings_updated', details: settings, req });
+  res.json({ settings });
 });
 
 router.post('/api/admin/users', requireAdmin, (req, res) => {
@@ -710,17 +724,73 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
   let ssh = null;
   let stream = null;
   let connected = false;
+  let closing = false;
   let size = { cols: 100, rows: 30 };
+  let lastTerminalActivityAt = Date.now();
+  let lastSessionRenewedAt = 0;
 
-  const denyIfUnauthorized = () => {
-    const allowed = kind === 'private'
-      ? privateRelay.canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)
-      : canUseSshTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id);
-    if (allowed) return false;
-    ws.send(JSON.stringify({ type: 'error', message: '登录状态或连接权限已失效' }));
-    ws.close(4003, 'permission revoked');
+  const canUseCurrentTerminal = () => kind === 'private'
+    ? privateRelay.canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)
+    : canUseSshTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id);
+
+  const closeTerminal = (code, reason, message) => {
+    if (closing) return true;
+    closing = true;
+    clearInterval(idleTimer);
+    if (message && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'error', message }));
+    }
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(code, reason);
+    }
     return true;
   };
+
+  const renewSessionIfNeeded = () => {
+    const settings = terminalSettingsStore.get();
+    if (!settings.activityRenewalEnabled) return;
+    const now = Date.now();
+    if (now - lastSessionRenewedAt < TERMINAL_ACTIVITY_TOUCH_INTERVAL_MS) return;
+    if (!canUseCurrentTerminal()) return;
+    const current = nowIso();
+    const expiresAt = new Date(now + settings.idleTimeoutSeconds * 1000).toISOString();
+    db.prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?')
+      .run(current, expiresAt, auth.session.id);
+    lastSessionRenewedAt = now;
+  };
+
+  const recordTerminalActivity = () => {
+    lastTerminalActivityAt = Date.now();
+    renewSessionIfNeeded();
+  };
+
+  const denyIfUnauthorized = () => {
+    if (canUseCurrentTerminal()) return false;
+    return closeTerminal(4003, 'permission revoked', '登录状态或连接权限已失效');
+  };
+
+  const idleTimer = setInterval(() => {
+    if (closing || ws.readyState !== WebSocket.OPEN) return;
+    const settings = terminalSettingsStore.get();
+    if (
+      settings.idleTimeoutEnabled &&
+      Date.now() - lastTerminalActivityAt >= settings.idleTimeoutSeconds * 1000
+    ) {
+      audit({
+        userId: auth.user.id,
+        type: kind === 'private' ? 'private_terminal_idle_timeout' : 'terminal_idle_timeout',
+        details: {
+          timeoutSeconds: settings.idleTimeoutSeconds,
+          endpointId: kind === 'private' ? target.id : undefined,
+          targetId: kind === 'private' ? undefined : target.id
+        },
+        req
+      });
+      closeTerminal(4000, 'terminal idle timeout', '终端已超过空闲超时时间，连接已断开。');
+      return;
+    }
+    denyIfUnauthorized();
+  }, TERMINAL_IDLE_CHECK_INTERVAL_MS);
 
   ws.on('message', (raw) => {
     if (denyIfUnauthorized()) return;
@@ -734,6 +804,7 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
     }
 
     if (message.type === 'resize') {
+      recordTerminalActivity();
       size = normalizeTerminalSize(message);
       if (stream) stream.setWindow(size.rows, size.cols, 0, 0);
       return;
@@ -742,6 +813,7 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
     if (message.type === 'connect') {
       if (connected) return;
       connected = true;
+      recordTerminalActivity();
       size = normalizeTerminalSize(message);
       const assignSession = (client, shellStream) => {
         ssh = client;
@@ -749,7 +821,7 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
       };
       if (kind === 'private') {
         privateRelay
-          .startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession)
+          .startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession, recordTerminalActivity)
           .catch(() => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'error', message: '私有终端连接初始化失败。' }));
@@ -757,17 +829,20 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
             }
           });
       } else {
-        startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession);
+        startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession, recordTerminalActivity);
       }
       return;
     }
 
     if (message.type === 'data') {
+      recordTerminalActivity();
       if (stream && typeof message.data === 'string') stream.write(message.data);
     }
   });
 
   ws.on('close', () => {
+    closing = true;
+    clearInterval(idleTimer);
     if (stream) stream.end();
     if (ssh) ssh.end();
     audit({
@@ -779,7 +854,7 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
   });
 }
 
-function startSshSession(ws, req, auth, target, sshAuth, size, assignSession) {
+function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, recordActivity = () => {}) {
   const client = new SshClient();
   const connectConfig = {
     host: target.host,
@@ -799,6 +874,7 @@ function startSshSession(ws, req, auth, target, sshAuth, size, assignSession) {
 
   client
     .on('ready', () => {
+      recordActivity();
       audit({ userId: auth.user.id, type: 'ssh_connected', details: { targetId: target.id }, req });
       client.shell(
         {
@@ -816,11 +892,13 @@ function startSshSession(ws, req, auth, target, sshAuth, size, assignSession) {
           assignSession(client, shellStream);
           ws.send(JSON.stringify({ type: 'ready' }));
           shellStream.on('data', (data) => {
+            recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
             }
           });
           shellStream.stderr.on('data', (data) => {
+            recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
             }

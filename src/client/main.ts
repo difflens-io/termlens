@@ -39,6 +39,12 @@ interface User {
   disabled: boolean;
 }
 
+interface TerminalSettings {
+  idleTimeoutEnabled: boolean;
+  activityRenewalEnabled: boolean;
+  idleTimeoutSeconds: number;
+}
+
 interface PrivateEnrollment {
   token: string;
   expiresAt: string;
@@ -1417,9 +1423,10 @@ async function renderAdmin() {
   }
 
   const privateRelayEnabled = Boolean(me.features?.privateRelay);
-  const [{ users, links }, { targets }, privateEndpointsPayload] = await Promise.all([
+  const [{ users, links }, { targets }, { settings: terminalSettings }, privateEndpointsPayload] = await Promise.all([
     api<{ users: User[]; links: Array<Record<string, unknown>> }>('admin/users'),
     api<{ targets: Target[] }>('admin/targets'),
+    api<{ settings: TerminalSettings }>('admin/settings/terminal'),
     privateRelayEnabled
       ? api<{ endpoints: Target[] }>('admin/private-endpoints')
       : Promise.resolve({ endpoints: [] as Target[] })
@@ -1453,6 +1460,21 @@ async function renderAdmin() {
         <label><span>端口</span><input name="port" type="number" value="22" min="1" max="65535" required /></label>
         <label><span>SSH 用户</span><input name="sshUsername" required /></label>
         <button class="button primary" type="submit">创建目标</button>
+      </form>
+
+      <form id="terminalSettingsForm" class="panel">
+        <h2>终端超时</h2>
+        <p class="muted">当前空闲超时 ${Math.round(terminalSettings.idleTimeoutSeconds / 60)} 分钟，活跃续期开启时正在使用的终端会持续续期；登录或权限失效仍会断开。</p>
+        <label><span>空闲超时（分钟）</span><input name="idleTimeoutMinutes" type="number" value="${Math.round(terminalSettings.idleTimeoutSeconds / 60)}" min="1" max="10080" required /></label>
+        <label class="checkbox-row">
+          <input name="idleTimeoutEnabled" type="checkbox" ${terminalSettings.idleTimeoutEnabled ? 'checked' : ''} />
+          <span>空闲超过该时间自动断开终端</span>
+        </label>
+        <label class="checkbox-row">
+          <input name="activityRenewalEnabled" type="checkbox" ${terminalSettings.activityRenewalEnabled ? 'checked' : ''} />
+          <span>检测到终端输入、窗口变化或远端输出时自动续期</span>
+        </label>
+        <button class="button primary" type="submit">保存终端设置</button>
       </form>
 
       ${privateRelayEnabled ? `
@@ -1657,6 +1679,25 @@ function bindAdminEvents() {
       });
       await renderAdmin();
       showPrivateEnrollmentActions(result.enrollment);
+    } catch (error) {
+      showMessage((error as Error).message, 'error');
+    }
+  });
+
+  document.querySelector<HTMLFormElement>('#terminalSettingsForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      await api('admin/settings/terminal', {
+        method: 'PUT',
+        json: {
+          idleTimeoutEnabled: form.get('idleTimeoutEnabled') === 'on',
+          activityRenewalEnabled: form.get('activityRenewalEnabled') === 'on',
+          idleTimeoutSeconds: Math.round(Number(form.get('idleTimeoutMinutes')) * 60)
+        }
+      });
+      await renderAdmin();
+      showMessage('终端超时设置已保存');
     } catch (error) {
       showMessage((error as Error).message, 'error');
     }
