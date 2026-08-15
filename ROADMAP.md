@@ -118,6 +118,12 @@ sequenceDiagram
 6. **Hardening** Planned
    - Add rate limits, idle timeouts, endpoint revocation, agent token rotation, optional key-pair or mTLS identity, and deeper relay audit events.
 
+7. **Graceful restart and connection draining** Planned
+   - Keep existing private relay, terminal WebSocket, and SSH sessions alive during deployments when possible.
+   - Stop accepting new relay terminal tickets during shutdown while allowing established sessions to drain.
+   - Add shutdown hooks that close idle relay connections first, wait for active streams, and enforce a maximum drain deadline.
+   - Document deployment requirements for single-backend or sticky WebSocket routing until relay connection state can be shared across processes.
+
 ### Non-goals
 
 - No direct browser-to-private-computer TCP connection.
