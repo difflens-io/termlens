@@ -2,6 +2,7 @@ import { Duplex } from 'node:stream';
 import { Client as SshClient } from 'ssh2';
 import { WebSocket, WebSocketServer } from 'ws';
 import { hashToken, nowIso, randomToken } from './security.js';
+import { createHostKeyVerifier, normalizeHostKeyFingerprint } from './ssh-host-key.js';
 import {
   isAllowedPrivateRelayHost,
   normalizePrivateRelayHost
@@ -136,6 +137,30 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
         res.json({ ok: true });
       });
 
+      router.put('/api/admin/private-endpoints/:id/host-key', requireAdmin, (req, res) => {
+        const endpoint = getPrivateEndpoint(Number(req.params.id));
+        if (!endpoint) return res.status(404).json({ error: '私有终端不存在' });
+        let input;
+        try {
+          input = normalizeHostKeyUpdate(req.body || {});
+        } catch (error) {
+          return res.status(400).json({ error: error.message });
+        }
+        db.prepare(`
+          UPDATE private_endpoints
+          SET host_key_policy = ?, host_key_type = ?,
+            host_key_fingerprint_sha256 = ?, updated_at = ?
+          WHERE id = ?
+        `).run(input.policy, input.keyType, input.fingerprintSha256, nowIso(), endpoint.id);
+        audit({
+          userId: req.auth.user.id,
+          type: 'admin_private_endpoint_host_key_updated',
+          details: { endpointId: endpoint.id, policy: input.policy },
+          req
+        });
+        res.json({ endpoint: publicPrivateEndpoint(getPrivateEndpoint(endpoint.id), agents) });
+      });
+
       router.get('/api/admin/users/:id/private-permissions', requireAdmin, (req, res) => {
         const userId = Number(req.params.id);
         const endpointIds = db.prepare('SELECT endpoint_id FROM user_private_endpoint_permissions WHERE user_id = ?')
@@ -247,13 +272,15 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
       `).get(userId, endpointId);
     },
 
-    createTerminalTicket({ userId, endpointId, accessLinkId, expiresAt }) {
+    createTerminalTicket({ userId, endpointId, accessLinkId, channel = 'browser', expiresAt }) {
       if (!enabled) return null;
       const ticket = randomToken(36);
       db.prepare(`
-        INSERT INTO private_terminal_tickets (ticket_hash, user_id, endpoint_id, access_link_id, expires_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(hashToken(ticket), userId, endpointId, accessLinkId, expiresAt, nowIso());
+        INSERT INTO private_terminal_tickets (
+          ticket_hash, user_id, endpoint_id, access_link_id, channel, expires_at, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(hashToken(ticket), userId, endpointId, accessLinkId, channel, expiresAt, nowIso());
       return ticket;
     },
 
@@ -292,12 +319,40 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
       return Boolean(session);
     },
 
+    canUseMobileTerminal(userId, accessLinkId, endpointId, deviceSessionId) {
+      if (!enabled) return false;
+      const now = nowIso();
+      const access = db.prepare(`
+        SELECT device_sessions.id
+        FROM device_sessions
+        JOIN users ON users.id = device_sessions.user_id
+        JOIN access_links AS device_link ON device_link.id = device_sessions.access_link_id
+        JOIN access_links AS ticket_link ON ticket_link.id = ?
+        JOIN user_private_endpoint_permissions
+          ON user_private_endpoint_permissions.user_id = device_sessions.user_id
+        JOIN private_endpoints
+          ON private_endpoints.id = user_private_endpoint_permissions.endpoint_id
+        WHERE device_sessions.user_id = ?
+          AND device_sessions.id = ?
+          AND ticket_link.user_id = device_sessions.user_id
+          AND user_private_endpoint_permissions.endpoint_id = ?
+          AND device_sessions.revoked_at IS NULL
+          AND device_sessions.refresh_expires_at > ?
+          AND users.disabled = 0
+          AND device_link.disabled = 0
+          AND ticket_link.disabled = 0
+          AND (ticket_link.expires_at IS NULL OR ticket_link.expires_at > ?)
+          AND private_endpoints.disabled = 0
+      `).get(accessLinkId, userId, deviceSessionId, endpointId, now, now);
+      return Boolean(access);
+    },
+
     publicEndpoint(endpoint) {
       if (!enabled || !endpoint) return null;
       return publicPrivateEndpoint(endpoint, agents);
     },
 
-    async startSshSession(ws, req, auth, endpoint, sshAuth, size, assignSession, recordActivity = () => {}) {
+    async startSshSession(ws, req, auth, endpoint, sshAuth, size, assignSession, recordActivity = () => {}, options = {}) {
       const agent = agents.get(endpoint.id);
       if (!agent || !agent.isOpen()) {
         ws.send(JSON.stringify({ type: 'error', message: '私有终端 Agent 不在线，请先在本地电脑启动 Agent。' }));
@@ -314,7 +369,19 @@ export function createPrivateRelay({ config, db, audit, mountPath }) {
         return;
       }
 
-      startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession, recordActivity);
+      startSshOverRelay(
+        ws,
+        req,
+        auth,
+        endpoint,
+        sshAuth,
+        size,
+        relayStream,
+        audit,
+        assignSession,
+        recordActivity,
+        options
+      );
     },
 
     onlineEndpointIds() {
@@ -548,6 +615,11 @@ function initSchema(db) {
     local_host TEXT NOT NULL DEFAULT '127.0.0.1',
     local_port INTEGER NOT NULL DEFAULT 22,
     ssh_username TEXT NOT NULL,
+    host_key_policy TEXT NOT NULL DEFAULT 'strict',
+    host_key_type TEXT NOT NULL DEFAULT '',
+    host_key_fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+    allowed_auth_methods TEXT NOT NULL DEFAULT '["password","privateKey"]',
+    default_term TEXT NOT NULL DEFAULT 'xterm-256color',
     disabled INTEGER NOT NULL DEFAULT 0,
     enrollment_token_hash TEXT NOT NULL DEFAULT '',
     enrollment_expires_at TEXT,
@@ -572,11 +644,24 @@ function initSchema(db) {
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     endpoint_id INTEGER NOT NULL REFERENCES private_endpoints(id) ON DELETE CASCADE,
     access_link_id INTEGER NOT NULL REFERENCES access_links(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL DEFAULT 'browser',
     expires_at TEXT NOT NULL,
     used_at TEXT,
     created_at TEXT NOT NULL
   );
   `);
+  ensureColumn(db, 'private_endpoints', 'host_key_policy', "TEXT NOT NULL DEFAULT 'strict'");
+  ensureColumn(db, 'private_endpoints', 'host_key_type', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'private_endpoints', 'host_key_fingerprint_sha256', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'private_endpoints', 'allowed_auth_methods', `TEXT NOT NULL DEFAULT '["password","privateKey"]'`);
+  ensureColumn(db, 'private_endpoints', 'default_term', "TEXT NOT NULL DEFAULT 'xterm-256color'");
+  ensureColumn(db, 'private_terminal_tickets', 'channel', "TEXT NOT NULL DEFAULT 'browser'");
+}
+
+function ensureColumn(db, tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
 }
 
 function publicPrivateEndpoint(endpoint, agents) {
@@ -588,6 +673,11 @@ function publicPrivateEndpoint(endpoint, agents) {
     host: endpoint.local_host,
     port: endpoint.local_port,
     sshUsername: endpoint.ssh_username,
+    hostKeyPolicy: endpoint.host_key_policy || 'strict',
+    hostKeyType: endpoint.host_key_type || '',
+    hostKeyFingerprintSha256: endpoint.host_key_fingerprint_sha256 || '',
+    allowedAuthMethods: parseAllowedAuthMethods(endpoint.allowed_auth_methods),
+    defaultTerm: endpoint.default_term || 'xterm-256color',
     online,
     disabled: Boolean(endpoint.disabled),
     agentEnrolled: Boolean(endpoint.agent_token_hash),
@@ -598,14 +688,40 @@ function publicPrivateEndpoint(endpoint, agents) {
   };
 }
 
-function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, audit, assignSession, recordActivity = () => {}) {
+function startSshOverRelay(
+  ws,
+  req,
+  auth,
+  endpoint,
+  sshAuth,
+  size,
+  relayStream,
+  audit,
+  assignSession,
+  recordActivity = () => {},
+  options = {}
+) {
   const client = new SshClient();
+  const hostKeyState = {};
+  const authMethod = sshAuth.method === 'privateKey' ? 'privateKey' : 'password';
+  if (!parseAllowedAuthMethods(endpoint.allowed_auth_methods).includes(authMethod)) {
+    sendTerminalJson(ws, options.mobile, {
+      type: 'error',
+      code: 'auth_method_not_allowed',
+      message: 'SSH authentication method is not allowed for this private endpoint.'
+    });
+    ws.close(1008, 'auth method not allowed');
+    relayStream.destroy();
+    return;
+  }
+
   const connectConfig = {
     sock: relayStream,
     username: endpoint.ssh_username,
     readyTimeout: 20000,
     keepaliveInterval: 15000,
-    keepaliveCountMax: 3
+    keepaliveCountMax: 3,
+    hostVerifier: createHostKeyVerifier(endpoint, hostKeyState)
   };
 
   if (sshAuth.method === 'privateKey') {
@@ -621,35 +737,50 @@ function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, 
       audit({ userId: auth.user.id, type: 'private_ssh_connected', details: { endpointId: endpoint.id }, req });
       client.shell(
         {
-          term: 'xterm-256color',
+          term: endpoint.default_term || 'xterm-256color',
           cols: size.cols,
           rows: size.rows
         },
         (error, shellStream) => {
           if (error) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Private SSH shell could not be opened.' }));
-            ws.close(1011, 'private ssh shell failed');
+              sendTerminalJson(ws, options.mobile, {
+                type: 'error',
+                code: 'ssh_shell_failed',
+                message: 'Private SSH shell could not be opened.'
+              });
+              ws.close(1011, 'private ssh shell failed');
             client.end();
             relayStream.destroy();
             return;
           }
           assignSession(client, shellStream);
-          ws.send(JSON.stringify({ type: 'ready' }));
+          sendTerminalJson(ws, options.mobile, {
+            type: 'ready',
+            version: options.mobile ? 1 : undefined,
+            hostKey: {
+              type: hostKeyState.keyType || endpoint.host_key_type || '',
+              fingerprintSha256: hostKeyState.fingerprint || '',
+              verified: Boolean(hostKeyState.verified)
+            }
+          });
           shellStream.on('data', (data) => {
             recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+              sendTerminalData(ws, options.mobile, data);
             }
           });
           shellStream.stderr.on('data', (data) => {
             recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+              sendTerminalData(ws, options.mobile, data);
             }
           });
           shellStream.on('close', () => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'closed' }));
+              sendTerminalJson(ws, options.mobile, {
+                type: 'closed',
+                version: options.mobile ? 1 : undefined
+              });
               ws.close(1000, 'private ssh closed');
             }
             client.end();
@@ -667,7 +798,13 @@ function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, 
       });
       relayStream.destroy();
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'error', message: 'Private SSH connection failed. Check the local SSH service and credentials.' }));
+        sendTerminalJson(ws, options.mobile, {
+          type: 'error',
+          version: options.mobile ? 1 : undefined,
+          code: hostKeyState.errorCode || 'ssh_failed',
+          message: hostKeyErrorMessage(hostKeyState.errorCode) ||
+            'Private SSH connection failed. Check the local SSH service and credentials.'
+        });
         ws.close(1011, 'private ssh failed');
       }
     })
@@ -682,6 +819,53 @@ function startSshOverRelay(ws, req, auth, endpoint, sshAuth, size, relayStream, 
   });
 
   client.connect(connectConfig);
+}
+
+function normalizeHostKeyUpdate(input) {
+  const policy = ['strict', 'disabled'].includes(input.policy)
+    ? input.policy
+    : ['strict', 'disabled'].includes(input.hostKeyPolicy)
+      ? input.hostKeyPolicy
+      : 'strict';
+  const fingerprintSha256 = normalizeHostKeyFingerprint(
+    input.fingerprintSha256 || input.hostKeyFingerprintSha256
+  );
+  const keyType = String(input.keyType || input.hostKeyType || '').trim().slice(0, 64);
+  if (policy === 'strict' && !fingerprintSha256) {
+    throw new Error('strict host key policy requires a SHA256 fingerprint');
+  }
+  return { policy, keyType, fingerprintSha256 };
+}
+
+function parseAllowedAuthMethods(value) {
+  try {
+    const methods = JSON.parse(String(value || '[]'));
+    if (!Array.isArray(methods)) return ['password', 'privateKey'];
+    const allowed = methods.filter((method) => method === 'password' || method === 'privateKey');
+    return allowed.length > 0 ? allowed : ['password', 'privateKey'];
+  } catch {
+    return ['password', 'privateKey'];
+  }
+}
+
+function hostKeyErrorMessage(code) {
+  if (code === 'host_key_unknown') return 'SSH host key is not enrolled.';
+  if (code === 'host_key_changed') return 'SSH host key changed.';
+  return '';
+}
+
+function sendTerminalJson(ws, mobile, message) {
+  const clean = Object.fromEntries(Object.entries(message).filter(([, value]) => value !== undefined));
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(clean));
+}
+
+function sendTerminalData(ws, mobile, data) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (mobile) {
+    ws.send(Buffer.from(data));
+  } else {
+    ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+  }
 }
 
 function agentWebSocketUrl(config, mountPath, req) {

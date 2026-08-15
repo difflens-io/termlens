@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS ssh_targets (
   host TEXT NOT NULL,
   port INTEGER NOT NULL DEFAULT 22,
   ssh_username TEXT NOT NULL,
+  host_key_policy TEXT NOT NULL DEFAULT 'strict',
+  host_key_type TEXT NOT NULL DEFAULT '',
+  host_key_fingerprint_sha256 TEXT NOT NULL DEFAULT '',
+  allowed_auth_methods TEXT NOT NULL DEFAULT '["password","privateKey"]',
+  default_term TEXT NOT NULL DEFAULT 'xterm-256color',
   disabled INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -70,6 +75,7 @@ CREATE TABLE IF NOT EXISTS terminal_tickets (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   target_id INTEGER NOT NULL REFERENCES ssh_targets(id) ON DELETE CASCADE,
   access_link_id INTEGER NOT NULL REFERENCES access_links(id) ON DELETE CASCADE,
+  channel TEXT NOT NULL DEFAULT 'browser',
   expires_at TEXT NOT NULL,
   used_at TEXT,
   created_at TEXT NOT NULL
@@ -100,7 +106,65 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS mobile_auth_challenges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  challenge_hash TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  access_link_id INTEGER NOT NULL REFERENCES access_links(id) ON DELETE CASCADE,
+  device_id_hash TEXT NOT NULL,
+  device_name TEXT NOT NULL DEFAULT '',
+  client_version TEXT NOT NULL DEFAULT '',
+  encrypted_secret TEXT NOT NULL DEFAULT '',
+  mfa_setup_required INTEGER NOT NULL DEFAULT 0,
+  failed_attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  access_link_id INTEGER NOT NULL REFERENCES access_links(id) ON DELETE CASCADE,
+  device_id_hash TEXT NOT NULL,
+  device_name TEXT NOT NULL DEFAULT '',
+  client_version TEXT NOT NULL DEFAULT '',
+  refresh_token_family_hash TEXT NOT NULL,
+  refresh_expires_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mobile_access_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  device_session_id INTEGER NOT NULL REFERENCES device_sessions(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mobile_refresh_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  family_hash TEXT NOT NULL,
+  device_session_id INTEGER NOT NULL REFERENCES device_sessions(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
 `);
+
+ensureColumn('ssh_targets', 'host_key_policy', "TEXT NOT NULL DEFAULT 'strict'");
+ensureColumn('ssh_targets', 'host_key_type', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('ssh_targets', 'host_key_fingerprint_sha256', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('ssh_targets', 'allowed_auth_methods', `TEXT NOT NULL DEFAULT '["password","privateKey"]'`);
+ensureColumn('ssh_targets', 'default_term', "TEXT NOT NULL DEFAULT 'xterm-256color'");
+ensureColumn('terminal_tickets', 'channel', "TEXT NOT NULL DEFAULT 'browser'");
 
 export function sanitizeUser(row) {
   if (!row) return null;
@@ -171,4 +235,10 @@ export function audit({ userId = null, type, details = {}, req = null }) {
     req?.headers?.['user-agent'] || '',
     nowIso()
   );
+}
+
+function ensureColumn(tableName, columnName, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
 }

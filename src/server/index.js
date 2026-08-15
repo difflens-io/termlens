@@ -19,6 +19,17 @@ import {
   sanitizeUser
 } from './db.js';
 import {
+  createDeviceSession,
+  createMobileAuthChallenge,
+  deleteMobileAuthChallenge,
+  findMobileAccessToken,
+  getMobileAuthChallenge,
+  incrementMobileAuthFailure,
+  listDeviceSessions,
+  revokeDeviceSession,
+  rotateMobileRefreshToken
+} from './mobile-session.js';
+import {
   createTotpSecret,
   decryptSecret,
   encryptSecret,
@@ -30,6 +41,7 @@ import {
   verifyPassword,
   verifyTotp
 } from './security.js';
+import { createHostKeyVerifier, normalizeHostKeyFingerprint } from './ssh-host-key.js';
 import { createPrivateRelay } from './private-relay.js';
 import { createTerminalSettingsStore } from './terminal-settings.js';
 
@@ -83,6 +95,254 @@ router.use((req, res, next) => {
 
 router.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'termlens' });
+});
+
+router.post('/api/mobile/v1/auth/start', async (req, res) => {
+  const inviteToken = String(req.body?.inviteToken || req.body?.accessToken || '');
+  const deviceId = String(req.body?.deviceId || '').trim();
+  const deviceName = String(req.body?.deviceName || '').trim();
+  const clientVersion = String(req.body?.clientVersion || '').trim();
+  const link = getAccessLinkByToken(inviteToken);
+  if (!isAccessLinkUsable(link)) {
+    return res.status(404).json({ error: '移动端邀请无效或已失效' });
+  }
+  if (deviceId.length < 8 || deviceId.length > 256) {
+    return res.status(400).json({ error: '设备标识无效' });
+  }
+
+  const expiresAt = new Date(Date.now() + config.mfaEnrollmentTtlSeconds * 1000).toISOString();
+  let encryptedSecret = '';
+  let qrDataUrl = '';
+  let mfaSetupRequired = false;
+  if (!link.totp_enabled) {
+    const { secret, otpauthUrl } = createTotpSecret(link.username);
+    encryptedSecret = encryptSecret(secret, config.secretKey);
+    qrDataUrl = await QRCode.toDataURL(otpauthUrl, { margin: 1, width: 220 });
+    mfaSetupRequired = true;
+  }
+
+  const challenge = createMobileAuthChallenge({
+    userId: link.user_id,
+    accessLinkId: link.id,
+    deviceId,
+    deviceName,
+    clientVersion,
+    encryptedSecret,
+    mfaSetupRequired,
+    expiresAt
+  });
+  audit({
+    userId: link.user_id,
+    type: mfaSetupRequired ? 'mobile_mfa_setup_started' : 'mobile_auth_started',
+    details: { accessLinkId: link.id, deviceName, clientVersion },
+    req
+  });
+
+  res.json({
+    challenge: challenge.challenge,
+    expiresAt: challenge.expiresAt,
+    mfaSetupRequired,
+    qrDataUrl
+  });
+});
+
+router.post('/api/mobile/v1/auth/verify', (req, res) => {
+  const challengeToken = String(req.body?.challenge || '');
+  const password = String(req.body?.password || '');
+  const totpCode = String(req.body?.totpCode || '');
+  const deviceId = String(req.body?.deviceId || '').trim();
+  const challenge = getMobileAuthChallenge(challengeToken);
+  if (!isMobileChallengeUsable(challenge)) {
+    return res.status(401).json({ error: '移动端登录会话无效或已过期' });
+  }
+  if (challenge.failed_attempts >= 10) {
+    deleteMobileAuthChallenge(challenge.id);
+    audit({ userId: challenge.user_id, type: 'mobile_auth_locked', req });
+    return res.status(429).json({ error: '移动端登录尝试过多，请重新开始' });
+  }
+  if (!deviceId || hashToken(deviceId) !== challenge.device_id_hash) {
+    incrementMobileAuthFailure(challenge.id);
+    return res.status(401).json({ error: '设备验证失败' });
+  }
+  if (!password || !verifyPassword(password, challenge.password_hash)) {
+    incrementMobileAuthFailure(challenge.id);
+    audit({ userId: challenge.user_id, type: 'mobile_login_failed', details: { reason: 'password' }, req });
+    return res.status(401).json({ error: '登录失败' });
+  }
+
+  let totpSecret = '';
+  if (challenge.mfa_setup_required) {
+    totpSecret = decryptSecret(challenge.encrypted_secret, config.secretKey);
+  } else {
+    totpSecret = decryptSecret(challenge.totp_secret, config.secretKey);
+  }
+  if (!verifyTotp(totpCode, totpSecret)) {
+    incrementMobileAuthFailure(challenge.id);
+    audit({ userId: challenge.user_id, type: 'mobile_login_failed', details: { reason: 'totp' }, req });
+    return res.status(401).json({ error: '双因子验证码无效' });
+  }
+
+  if (challenge.mfa_setup_required) {
+    db.prepare(`
+      UPDATE users
+      SET totp_secret = ?, totp_enabled = 1, updated_at = ?
+      WHERE id = ?
+    `).run(encryptSecret(totpSecret, config.secretKey), nowIso(), challenge.user_id);
+    audit({ userId: challenge.user_id, type: 'mobile_mfa_setup_success', req });
+  }
+
+  deleteMobileAuthChallenge(challenge.id);
+  db.prepare('UPDATE access_links SET used_count = used_count + 1 WHERE id = ?').run(challenge.access_link_id);
+  const tokens = createDeviceSession({
+    userId: challenge.user_id,
+    accessLinkId: challenge.access_link_id,
+    deviceId,
+    deviceName: challenge.device_name,
+    clientVersion: challenge.client_version
+  });
+  audit({
+    userId: challenge.user_id,
+    type: 'mobile_login_success',
+    details: { deviceSessionId: tokens.deviceSessionId, accessLinkId: challenge.access_link_id },
+    req
+  });
+  res.status(201).json({
+    ok: true,
+    user: sanitizeUser(getUserById(challenge.user_id)),
+    accessToken: tokens.accessToken,
+    accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+    refreshToken: tokens.refreshToken,
+    refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
+    deviceSessionId: tokens.deviceSessionId
+  });
+});
+
+router.post('/api/mobile/v1/token/refresh', (req, res) => {
+  const refreshToken = String(req.body?.refreshToken || '');
+  const result = rotateMobileRefreshToken(refreshToken);
+  if (!result.ok) {
+    audit({ type: 'mobile_token_refresh_failed', details: { reason: result.reason }, req });
+    return res.status(401).json({ error: '移动端刷新凭据无效' });
+  }
+  audit({
+    userId: result.userId,
+    type: 'mobile_token_refreshed',
+    details: { deviceSessionId: result.deviceSessionId },
+    req
+  });
+  res.json({
+    accessToken: result.accessToken,
+    accessTokenExpiresAt: result.accessTokenExpiresAt,
+    refreshToken: result.refreshToken,
+    refreshTokenExpiresAt: result.refreshTokenExpiresAt,
+    deviceSessionId: result.deviceSessionId
+  });
+});
+
+router.post('/api/mobile/v1/token/revoke', requireMobileAuth, (req, res) => {
+  revokeDeviceSession(req.mobileAuth.session.id);
+  audit({
+    userId: req.mobileAuth.user.id,
+    type: 'mobile_token_revoked',
+    details: { deviceSessionId: req.mobileAuth.session.id },
+    req
+  });
+  res.json({ ok: true });
+});
+
+router.get('/api/mobile/v1/devices', requireMobileAuth, (req, res) => {
+  res.json({
+    devices: listDeviceSessions(req.mobileAuth.user.id).map(publicDeviceSession)
+  });
+});
+
+router.post('/api/mobile/v1/devices/:id/revoke', requireMobileAuth, (req, res) => {
+  const deviceSessionId = Number(req.params.id);
+  const device = listDeviceSessions(req.mobileAuth.user.id).find((item) => item.id === deviceSessionId);
+  if (!device) return res.status(404).json({ error: '设备不存在' });
+  revokeDeviceSession(deviceSessionId);
+  audit({
+    userId: req.mobileAuth.user.id,
+    type: 'mobile_device_revoked',
+    details: { deviceSessionId },
+    req
+  });
+  res.json({ ok: true });
+});
+
+router.get('/api/mobile/v1/targets', requireMobileAuth, (req, res) => {
+  res.json({
+    targets: [
+      ...getAllowedTargets(req.mobileAuth.user.id),
+      ...privateRelay.getAllowedEndpoints(req.mobileAuth.user.id)
+    ]
+  });
+});
+
+router.post('/api/mobile/v1/terminal/tickets', requireMobileAuth, (req, res) => {
+  const targetId = Number(req.body?.targetId);
+  const targetKind = req.body?.targetKind === 'private' ? 'private' : 'ssh';
+  const expiresAt = new Date(Date.now() + config.ticketTtlSeconds * 1000).toISOString();
+
+  if (targetKind === 'private') {
+    const endpoint = privateRelay.getAllowedEndpoint(req.mobileAuth.user.id, targetId);
+    if (!endpoint) return res.status(403).json({ error: '没有该私有终端的连接权限' });
+    if (!privateRelay.onlineEndpointIds().has(endpoint.id)) {
+      return res.status(409).json({ error: '私有终端 Agent 不在线' });
+    }
+    const ticket = privateRelay.createTerminalTicket({
+      userId: req.mobileAuth.user.id,
+      endpointId: endpoint.id,
+      accessLinkId: req.mobileAuth.session.accessLinkId,
+      channel: 'mobile',
+      expiresAt
+    });
+    audit({
+      userId: req.mobileAuth.user.id,
+      type: 'mobile_private_terminal_ticket_created',
+      details: { endpointId: endpoint.id, deviceSessionId: req.mobileAuth.session.id },
+      req
+    });
+    return res.json({
+      ticket,
+      expiresAt,
+      webSocketPath: `${config.basePath}ws/mobile/v1/terminal`,
+      protocol: 'TLTP/1'
+    });
+  }
+
+  const target = getAllowedTarget(req.mobileAuth.user.id, targetId);
+  if (!target) return res.status(403).json({ error: '没有该目标的连接权限' });
+
+  const ticket = randomToken(36);
+  db.prepare(`
+    INSERT INTO terminal_tickets (
+      ticket_hash, user_id, target_id, access_link_id, channel, expires_at, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    hashToken(ticket),
+    req.mobileAuth.user.id,
+    target.id,
+    req.mobileAuth.session.accessLinkId,
+    'mobile',
+    expiresAt,
+    nowIso()
+  );
+
+  audit({
+    userId: req.mobileAuth.user.id,
+    type: 'mobile_terminal_ticket_created',
+    details: { targetId: target.id, deviceSessionId: req.mobileAuth.session.id },
+    req
+  });
+
+  res.json({
+    ticket,
+    expiresAt,
+    webSocketPath: `${config.basePath}ws/mobile/v1/terminal`,
+    protocol: 'TLTP/1'
+  });
 });
 
 router.get('/api/me', (req, res) => {
@@ -386,6 +646,31 @@ router.post('/api/admin/targets/:id/disabled', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+router.put('/api/admin/targets/:id/host-key', requireAdmin, (req, res) => {
+  const targetId = Number(req.params.id);
+  const target = db.prepare('SELECT * FROM ssh_targets WHERE id = ?').get(targetId);
+  if (!target) return res.status(404).json({ error: '目标不存在' });
+  let input;
+  try {
+    input = normalizeHostKeyUpdate(req.body || {});
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  db.prepare(`
+    UPDATE ssh_targets
+    SET host_key_policy = ?, host_key_type = ?,
+      host_key_fingerprint_sha256 = ?, updated_at = ?
+    WHERE id = ?
+  `).run(input.policy, input.keyType, input.fingerprintSha256, nowIso(), target.id);
+  audit({
+    userId: req.auth.user.id,
+    type: 'admin_target_host_key_updated',
+    details: { targetId: target.id, policy: input.policy },
+    req
+  });
+  res.json({ target: publicTarget(db.prepare('SELECT * FROM ssh_targets WHERE id = ?').get(target.id)) });
+});
+
 router.get('/api/admin/users/:id/permissions', requireAdmin, (req, res) => {
   const userId = Number(req.params.id);
   const targetIds = db.prepare('SELECT target_id FROM user_target_permissions WHERE user_id = ?')
@@ -435,6 +720,35 @@ server.on('upgrade', (req, socket, head) => {
   if (privateRelay.handleAgentUpgrade(req, socket, head)) return;
 
   const url = new URL(req.url || '/', 'http://localhost');
+  if (url.pathname === `${mountPath}/ws/mobile/v1/terminal`) {
+    const auth = authenticateMobileRequest(req);
+    if (!auth) {
+      rejectUpgrade(req, socket, 401, 'Mobile access token is required.');
+      return;
+    }
+    if (firstHeader(req.headers['x-termlane-protocol']) !== '1') {
+      rejectUpgrade(req, socket, 426, 'TLTP/1 is required.', auth.user.id, { reason: 'protocol_required' });
+      return;
+    }
+    const ticketToken = firstHeader(req.headers['x-termlane-ticket']);
+    const context = findTerminalTicketContext(ticketToken, auth.user.id, 'mobile');
+    if (!context || !isTicketFresh(context.ticket) || context.ticket.channel !== 'mobile') {
+      rejectUpgrade(req, socket, 403, 'Terminal ticket is invalid, used, or expired.', auth.user.id, {
+        reason: 'invalid_mobile_ticket'
+      });
+      return;
+    }
+    if (context.kind === 'ssh') {
+      db.prepare('UPDATE terminal_tickets SET used_at = ? WHERE id = ?').run(nowIso(), context.ticket.id);
+    } else {
+      privateRelay.markTicketUsed(context.ticket.id);
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req, { auth, ...context, mobile: true });
+    });
+    return;
+  }
+
   if (url.pathname !== `${mountPath}/ws/terminal`) {
     rejectUpgrade(req, socket, 404, 'Unknown WebSocket endpoint.');
     return;
@@ -447,8 +761,8 @@ server.on('upgrade', (req, socket, head) => {
   }
 
   const ticketToken = url.searchParams.get('ticket') || '';
-  const context = findTerminalTicketContext(ticketToken, auth.user.id);
-  if (!context || !isTicketFresh(context.ticket)) {
+  const context = findTerminalTicketContext(ticketToken, auth.user.id, 'browser');
+  if (!context || !isTicketFresh(context.ticket) || context.ticket.channel === 'mobile') {
     rejectUpgrade(req, socket, 403, 'Terminal ticket is invalid, used, or expired.', auth.user.id, {
       reason: 'invalid_ticket'
     });
@@ -514,10 +828,39 @@ function authenticateRequest(req) {
   };
 }
 
+function authenticateMobileRequest(req) {
+  const token = bearerToken(req.headers.authorization);
+  const access = findMobileAccessToken(token);
+  if (!access) return null;
+  return {
+    session: {
+      id: access.device_session_id,
+      accessLinkId: access.access_link_id,
+      deviceName: access.device_name,
+      clientVersion: access.client_version
+    },
+    user: {
+      id: access.user_id,
+      username: access.username,
+      display_name: access.display_name,
+      role: access.role,
+      disabled: access.user_disabled,
+      totp_enabled: access.totp_enabled
+    }
+  };
+}
+
 function requireAuth(req, res, next) {
   const auth = authenticateRequest(req);
   if (!auth) return res.status(401).json({ error: '需要登录' });
   req.auth = auth;
+  next();
+}
+
+function requireMobileAuth(req, res, next) {
+  const auth = authenticateMobileRequest(req);
+  if (!auth) return res.status(401).json({ error: '需要移动端登录' });
+  req.mobileAuth = auth;
   next();
 }
 
@@ -630,6 +973,11 @@ function publicTarget(row) {
     host: row.host,
     port: row.port,
     sshUsername: row.ssh_username,
+    hostKeyPolicy: row.host_key_policy || 'strict',
+    hostKeyType: row.host_key_type || '',
+    hostKeyFingerprintSha256: row.host_key_fingerprint_sha256 || '',
+    allowedAuthMethods: parseAllowedAuthMethods(row.allowed_auth_methods),
+    defaultTerm: row.default_term || 'xterm-256color',
     disabled: Boolean(row.disabled),
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -641,9 +989,10 @@ function findTicket(ticketToken) {
   return db.prepare('SELECT * FROM terminal_tickets WHERE ticket_hash = ?').get(hashToken(ticketToken));
 }
 
-function findTerminalTicketContext(ticketToken, userId) {
+function findTerminalTicketContext(ticketToken, userId, channel = '') {
   const ticket = findTicket(ticketToken);
   if (ticket && ticket.user_id === userId) {
+    if (channel && ticket.channel !== channel) return null;
     const target = getAllowedTarget(userId, ticket.target_id);
     if (!target) return null;
     return {
@@ -656,6 +1005,7 @@ function findTerminalTicketContext(ticketToken, userId) {
 
   const privateTicket = privateRelay.findTerminalTicket(ticketToken);
   if (privateTicket && privateTicket.user_id === userId) {
+    if (channel && privateTicket.channel !== channel) return null;
     const endpoint = privateRelay.getAllowedEndpoint(userId, privateTicket.endpoint_id);
     if (!endpoint) return null;
     return {
@@ -720,7 +1070,52 @@ function canUseSshTerminal(sessionId, userId, accessLinkId, targetId) {
   return Boolean(session);
 }
 
-function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
+function canUseMobileSshTerminal(userId, accessLinkId, targetId, deviceSessionId) {
+  const now = nowIso();
+  const access = db.prepare(`
+    SELECT device_sessions.id
+    FROM device_sessions
+    JOIN users ON users.id = device_sessions.user_id
+    JOIN access_links AS device_link ON device_link.id = device_sessions.access_link_id
+    JOIN access_links AS ticket_link ON ticket_link.id = ?
+    JOIN user_target_permissions ON user_target_permissions.user_id = device_sessions.user_id
+    JOIN ssh_targets ON ssh_targets.id = user_target_permissions.target_id
+    WHERE device_sessions.id = ?
+      AND device_sessions.user_id = ?
+      AND ticket_link.user_id = device_sessions.user_id
+      AND user_target_permissions.target_id = ?
+      AND device_sessions.revoked_at IS NULL
+      AND device_sessions.refresh_expires_at > ?
+      AND users.disabled = 0
+      AND device_link.disabled = 0
+      AND ticket_link.disabled = 0
+      AND (ticket_link.expires_at IS NULL OR ticket_link.expires_at > ?)
+      AND ssh_targets.disabled = 0
+  `).get(accessLinkId, deviceSessionId, userId, targetId, now, now);
+  return Boolean(access);
+}
+
+function sendTerminalJson(ws, message) {
+  const clean = Object.fromEntries(Object.entries(message).filter(([, value]) => value !== undefined));
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(clean));
+}
+
+function sendTerminalData(ws, mobile, data) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (mobile) {
+    ws.send(Buffer.from(data));
+  } else {
+    ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+  }
+}
+
+function hostKeyErrorMessage(code) {
+  if (code === 'host_key_unknown') return 'SSH host key is not enrolled.';
+  if (code === 'host_key_changed') return 'SSH host key changed.';
+  return '';
+}
+
+function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = false }) {
   let ssh = null;
   let stream = null;
   let connected = false;
@@ -729,16 +1124,23 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
   let lastTerminalActivityAt = Date.now();
   let lastSessionRenewedAt = 0;
 
-  const canUseCurrentTerminal = () => kind === 'private'
-    ? privateRelay.canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)
-    : canUseSshTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id);
+  const canUseCurrentTerminal = () => {
+    if (mobile) {
+      return kind === 'private'
+        ? privateRelay.canUseMobileTerminal(auth.user.id, ticket.access_link_id, target.id, auth.session.id)
+        : canUseMobileSshTerminal(auth.user.id, ticket.access_link_id, target.id, auth.session.id);
+    }
+    return kind === 'private'
+      ? privateRelay.canUseTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id)
+      : canUseSshTerminal(auth.session.id, auth.user.id, ticket.access_link_id, target.id);
+  };
 
   const closeTerminal = (code, reason, message) => {
     if (closing) return true;
     closing = true;
     clearInterval(idleTimer);
     if (message && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'error', message }));
+      sendTerminalJson(ws, { type: 'error', message });
     }
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
       ws.close(code, reason);
@@ -753,6 +1155,12 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
     if (now - lastSessionRenewedAt < TERMINAL_ACTIVITY_TOUCH_INTERVAL_MS) return;
     if (!canUseCurrentTerminal()) return;
     const current = nowIso();
+    if (mobile) {
+      db.prepare('UPDATE device_sessions SET last_seen_at = ?, updated_at = ? WHERE id = ?')
+        .run(current, current, auth.session.id);
+      lastSessionRenewedAt = now;
+      return;
+    }
     const expiresAt = new Date(now + settings.idleTimeoutSeconds * 1000).toISOString();
     db.prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?')
       .run(current, expiresAt, auth.session.id);
@@ -792,14 +1200,29 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
     denyIfUnauthorized();
   }, TERMINAL_IDLE_CHECK_INTERVAL_MS);
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
     if (denyIfUnauthorized()) return;
+
+    if (mobile && isBinary) {
+      if (raw.length > 64 * 1024) {
+        closeTerminal(1009, 'message too large', 'TLTP/1 binary frame is too large');
+        return;
+      }
+      recordTerminalActivity();
+      if (stream) stream.write(Buffer.from(raw));
+      return;
+    }
 
     let message;
     try {
       message = JSON.parse(String(raw));
     } catch {
-      ws.send(JSON.stringify({ type: 'error', message: '终端消息格式无效' }));
+      sendTerminalJson(ws, { type: 'error', message: '终端消息格式无效' });
+      return;
+    }
+
+    if (mobile && message.type === 'close') {
+      closeTerminal(1000, 'client closed');
       return;
     }
 
@@ -810,7 +1233,7 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
       return;
     }
 
-    if (message.type === 'connect') {
+    if (message.type === 'connect' || (mobile && message.type === 'open')) {
       if (connected) return;
       connected = true;
       recordTerminalActivity();
@@ -821,20 +1244,40 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
       };
       if (kind === 'private') {
         privateRelay
-          .startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession, recordTerminalActivity)
+          .startSshSession(
+            ws,
+            req,
+            auth,
+            target,
+            message.auth || {},
+            size,
+            assignSession,
+            recordTerminalActivity,
+            { mobile }
+          )
           .catch(() => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'error', message: '私有终端连接初始化失败。' }));
+              sendTerminalJson(ws, { type: 'error', message: '私有终端连接初始化失败。' });
               ws.close(1011, 'private terminal init failed');
             }
           });
       } else {
-        startSshSession(ws, req, auth, target, message.auth || {}, size, assignSession, recordTerminalActivity);
+        startSshSession(
+          ws,
+          req,
+          auth,
+          target,
+          message.auth || {},
+          size,
+          assignSession,
+          recordTerminalActivity,
+          { mobile }
+        );
       }
       return;
     }
 
-    if (message.type === 'data') {
+    if (!mobile && message.type === 'data') {
       recordTerminalActivity();
       if (stream && typeof message.data === 'string') stream.write(message.data);
     }
@@ -847,22 +1290,37 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target }) {
     if (ssh) ssh.end();
     audit({
       userId: auth.user.id,
-      type: kind === 'private' ? 'private_terminal_socket_closed' : 'terminal_socket_closed',
+      type: mobile
+        ? (kind === 'private' ? 'mobile_private_terminal_socket_closed' : 'mobile_terminal_socket_closed')
+        : (kind === 'private' ? 'private_terminal_socket_closed' : 'terminal_socket_closed'),
       details: kind === 'private' ? { endpointId: target.id } : { targetId: target.id },
       req
     });
   });
 }
 
-function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, recordActivity = () => {}) {
+function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, recordActivity = () => {}, options = {}) {
   const client = new SshClient();
+  const hostKeyState = {};
+  const authMethod = sshAuth.method === 'privateKey' ? 'privateKey' : 'password';
+  if (!parseAllowedAuthMethods(target.allowed_auth_methods).includes(authMethod)) {
+    sendTerminalJson(ws, {
+      type: 'error',
+      code: 'auth_method_not_allowed',
+      message: 'SSH authentication method is not allowed for this target.'
+    });
+    ws.close(1008, 'auth method not allowed');
+    return;
+  }
+
   const connectConfig = {
     host: target.host,
     port: target.port,
     username: target.ssh_username,
     readyTimeout: 20000,
     keepaliveInterval: 15000,
-    keepaliveCountMax: 3
+    keepaliveCountMax: 3,
+    hostVerifier: createHostKeyVerifier(target, hostKeyState)
   };
 
   if (sshAuth.method === 'privateKey') {
@@ -878,33 +1336,48 @@ function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, re
       audit({ userId: auth.user.id, type: 'ssh_connected', details: { targetId: target.id }, req });
       client.shell(
         {
-          term: 'xterm-256color',
+          term: target.default_term || 'xterm-256color',
           cols: size.cols,
           rows: size.rows
         },
         (error, shellStream) => {
           if (error) {
-            ws.send(JSON.stringify({ type: 'error', message: 'SSH shell could not be opened.' }));
+            sendTerminalJson(ws, {
+              type: 'error',
+              code: 'ssh_shell_failed',
+              message: 'SSH shell could not be opened.'
+            });
             ws.close(1011, 'ssh shell failed');
             client.end();
             return;
           }
           assignSession(client, shellStream);
-          ws.send(JSON.stringify({ type: 'ready' }));
+          sendTerminalJson(ws, {
+            type: 'ready',
+            version: options.mobile ? 1 : undefined,
+            hostKey: {
+              type: hostKeyState.keyType || target.host_key_type || '',
+              fingerprintSha256: hostKeyState.fingerprint || '',
+              verified: Boolean(hostKeyState.verified)
+            }
+          });
           shellStream.on('data', (data) => {
             recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+              sendTerminalData(ws, options.mobile, data);
             }
           });
           shellStream.stderr.on('data', (data) => {
             recordActivity();
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'data', data: data.toString('utf8') }));
+              sendTerminalData(ws, options.mobile, data);
             }
           });
           shellStream.on('close', () => {
-            ws.send(JSON.stringify({ type: 'closed' }));
+            sendTerminalJson(ws, {
+              type: 'closed',
+              version: options.mobile ? 1 : undefined
+            });
             ws.close(1000, 'ssh closed');
             client.end();
           });
@@ -914,7 +1387,13 @@ function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, re
     .on('error', (error) => {
       audit({ userId: auth.user.id, type: 'ssh_connect_failed', details: { targetId: target.id, code: error.code }, req });
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'error', message: 'SSH connection failed. Check the target host and credentials.' }));
+        sendTerminalJson(ws, {
+          type: 'error',
+          version: options.mobile ? 1 : undefined,
+          code: hostKeyState.errorCode || 'ssh_failed',
+          message: hostKeyErrorMessage(hostKeyState.errorCode) ||
+            'SSH connection failed. Check the target host and credentials.'
+        });
         ws.close(1011, 'ssh failed');
       }
     })
@@ -932,4 +1411,73 @@ function normalizeTerminalSize(message) {
     cols: Number.isInteger(cols) && cols > 0 && cols < 400 ? cols : 100,
     rows: Number.isInteger(rows) && rows > 0 && rows < 200 ? rows : 30
   };
+}
+
+function isMobileChallengeUsable(challenge) {
+  if (!challenge || challenge.user_disabled || challenge.access_link_disabled) return false;
+  if (new Date(challenge.expires_at).getTime() <= Date.now()) return false;
+  if (
+    challenge.access_link_expires_at &&
+    new Date(challenge.access_link_expires_at).getTime() <= Date.now()
+  ) {
+    return false;
+  }
+  if (
+    challenge.access_link_max_uses > 0 &&
+    challenge.access_link_used_count >= challenge.access_link_max_uses
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function publicDeviceSession(row) {
+  return {
+    id: row.id,
+    deviceName: row.device_name,
+    clientVersion: row.client_version,
+    lastSeenAt: row.last_seen_at,
+    revoked: Boolean(row.revoked_at),
+    revokedAt: row.revoked_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function normalizeHostKeyUpdate(input) {
+  const policy = ['strict', 'disabled'].includes(input.policy)
+    ? input.policy
+    : ['strict', 'disabled'].includes(input.hostKeyPolicy)
+      ? input.hostKeyPolicy
+      : 'strict';
+  const fingerprintSha256 = normalizeHostKeyFingerprint(
+    input.fingerprintSha256 || input.hostKeyFingerprintSha256
+  );
+  const keyType = String(input.keyType || input.hostKeyType || '').trim().slice(0, 64);
+  if (policy === 'strict' && !fingerprintSha256) {
+    throw new Error('strict host key policy requires a SHA256 fingerprint');
+  }
+  return { policy, keyType, fingerprintSha256 };
+}
+
+function parseAllowedAuthMethods(value) {
+  try {
+    const methods = JSON.parse(String(value || '[]'));
+    if (!Array.isArray(methods)) return ['password', 'privateKey'];
+    const allowed = methods.filter((method) => method === 'password' || method === 'privateKey');
+    return allowed.length > 0 ? allowed : ['password', 'privateKey'];
+  } catch {
+    return ['password', 'privateKey'];
+  }
+}
+
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0] || '';
+  return String(value || '').split(',')[0].trim();
+}
+
+function bearerToken(value) {
+  const header = firstHeader(value);
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match ? match[1].trim() : '';
 }
