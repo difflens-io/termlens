@@ -55,6 +55,11 @@ const wss = new WebSocketServer({ noServer: true });
 const loginAttempts = new Map();
 const TERMINAL_ACTIVITY_TOUCH_INTERVAL_MS = 30_000;
 const TERMINAL_IDLE_CHECK_INTERVAL_MS = 30_000;
+const MOBILE_TERMINAL_REPLAY_LIMIT_BYTES = 8 * 1024 * 1024;
+const MOBILE_TERMINAL_DETACHED_TTL_MS = 30 * 60 * 1000;
+
+const mobileTerminalSessions = new Map();
+const mobileTerminalResumeTickets = new Map();
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -343,6 +348,61 @@ router.post('/api/mobile/v1/terminal/tickets', requireMobileAuth, (req, res) => 
     webSocketPath: `${config.basePath}ws/mobile/v1/terminal`,
     protocol: 'TLTP/1'
   });
+});
+
+router.get('/api/mobile/v1/terminal/sessions', requireMobileAuth, (req, res) => {
+  const sessions = [];
+  for (const session of mobileTerminalSessions.values()) {
+    if (!canUseMobileManagedTerminal(session, req.mobileAuth)) continue;
+    sessions.push(session.publicInfo());
+  }
+  res.json({ sessions });
+});
+
+router.post('/api/mobile/v1/terminal/sessions/:id/tickets', requireMobileAuth, (req, res) => {
+  const sessionId = String(req.params.id || '');
+  const session = mobileTerminalSessions.get(sessionId);
+  if (!session || !canUseMobileManagedTerminal(session, req.mobileAuth)) {
+    return res.status(404).json({ error: '移动终端会话不存在或无权恢复' });
+  }
+
+  const ticket = randomToken(36);
+  const expiresAt = new Date(Date.now() + config.ticketTtlSeconds * 1000).toISOString();
+  mobileTerminalResumeTickets.set(hashToken(ticket), {
+    userId: req.mobileAuth.user.id,
+    deviceSessionId: req.mobileAuth.session.id,
+    sessionId,
+    expiresAt
+  });
+  audit({
+    userId: req.mobileAuth.user.id,
+    type: 'mobile_terminal_resume_ticket_created',
+    details: { sessionId, targetId: session.targetId },
+    req
+  });
+  res.json({
+    ticket,
+    expiresAt,
+    webSocketPath: `${config.basePath}ws/mobile/v1/terminal`,
+    protocol: 'TLTP/1',
+    session: session.publicInfo()
+  });
+});
+
+router.post('/api/mobile/v1/terminal/sessions/:id/close', requireMobileAuth, (req, res) => {
+  const sessionId = String(req.params.id || '');
+  const session = mobileTerminalSessions.get(sessionId);
+  if (!session || !canUseMobileManagedTerminal(session, req.mobileAuth)) {
+    return res.status(404).json({ error: '移动终端会话不存在或无权关闭' });
+  }
+  session.close(1000, 'mobile session closed');
+  audit({
+    userId: req.mobileAuth.user.id,
+    type: 'mobile_terminal_session_closed',
+    details: { sessionId, targetId: session.targetId },
+    req
+  });
+  res.json({ ok: true });
 });
 
 router.get('/api/me', (req, res) => {
@@ -731,6 +791,14 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
     const ticketToken = firstHeader(req.headers['x-termlane-ticket']);
+    const resumeContext = findMobileTerminalResumeContext(ticketToken, auth);
+    if (resumeContext) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req, { auth, ...resumeContext, mobile: true });
+      });
+      return;
+    }
+
     const context = findTerminalTicketContext(ticketToken, auth.user.id, 'mobile');
     if (!context || !isTicketFresh(context.ticket) || context.ticket.channel !== 'mobile') {
       rejectUpgrade(req, socket, 403, 'Terminal ticket is invalid, used, or expired.', auth.user.id, {
@@ -1023,6 +1091,209 @@ function isTicketFresh(ticket) {
   return ticket && !ticket.used_at && new Date(ticket.expires_at).getTime() > Date.now();
 }
 
+function findMobileTerminalResumeContext(ticketToken, auth) {
+  if (!ticketToken || !auth) return null;
+  const ticketHash = hashToken(ticketToken);
+  const entry = mobileTerminalResumeTickets.get(ticketHash);
+  mobileTerminalResumeTickets.delete(ticketHash);
+  if (!entry || entry.userId !== auth.user.id || entry.deviceSessionId !== auth.session.id) return null;
+  if (new Date(entry.expiresAt).getTime() <= Date.now()) return null;
+  const session = mobileTerminalSessions.get(entry.sessionId);
+  if (!session || !canUseMobileManagedTerminal(session, auth)) return null;
+  return {
+    kind: session.kind,
+    target: session.target,
+    publicTarget: session.publicTarget,
+    resumeSessionId: session.id
+  };
+}
+
+function canUseMobileManagedTerminal(session, auth) {
+  if (!session || session.closed || !auth) return false;
+  if (session.userId !== auth.user.id || session.deviceSessionId !== auth.session.id) return false;
+  return canUseMobileSshTerminal(
+    auth.user.id,
+    session.accessLinkId,
+    session.targetId,
+    auth.session.id
+  );
+}
+
+function sweepDetachedMobileTerminalSessions() {
+  const now = Date.now();
+  for (const [ticketHash, ticket] of mobileTerminalResumeTickets.entries()) {
+    if (new Date(ticket.expiresAt).getTime() <= now) {
+      mobileTerminalResumeTickets.delete(ticketHash);
+    }
+  }
+  for (const session of mobileTerminalSessions.values()) {
+    if (!session.attached && now - session.detachedAt >= MOBILE_TERMINAL_DETACHED_TTL_MS) {
+      session.close(4000, 'detached session expired');
+    }
+  }
+}
+
+setInterval(sweepDetachedMobileTerminalSessions, 60_000).unref?.();
+
+class MobileManagedTerminalSession {
+  constructor({ auth, target, publicTarget, ticket, size, req }) {
+    this.id = `s_${randomToken(18)}`;
+    this.kind = 'ssh';
+    this.userId = auth.user.id;
+    this.deviceSessionId = auth.session.id;
+    this.accessLinkId = ticket.access_link_id;
+    this.targetId = target.id;
+    this.target = target;
+    this.publicTarget = publicTarget;
+    this.size = size;
+    this.req = req;
+    this.ssh = null;
+    this.stream = null;
+    this.ws = null;
+    this.ready = false;
+    this.closed = false;
+    this.attached = false;
+    this.detachedAt = Date.now();
+    this.createdAt = nowIso();
+    this.updatedAt = this.createdAt;
+    this.closedAt = '';
+    this.hostKey = null;
+    this.backlog = [];
+    this.backlogBytes = 0;
+  }
+
+  publicInfo() {
+    return {
+      id: this.id,
+      kind: this.kind,
+      targetId: this.targetId,
+      targetKind: this.publicTarget?.kind || this.kind,
+      targetName: this.publicTarget?.name || this.target.name || '',
+      host: this.publicTarget?.host || this.target.host || '',
+      port: this.publicTarget?.port || this.target.port || 22,
+      sshUsername: this.publicTarget?.sshUsername || this.target.ssh_username || '',
+      attached: this.attached,
+      ready: this.ready,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt
+    };
+  }
+
+  attach(ws) {
+    if (this.closed) return false;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.ws !== ws) {
+      this.ws.close(4001, 'terminal attached elsewhere');
+    }
+    this.ws = ws;
+    this.attached = true;
+    this.updatedAt = nowIso();
+    if (this.ready) {
+      this.sendReady();
+      this.replayBacklog();
+    }
+    return true;
+  }
+
+  markReady({ ssh, stream, hostKey }) {
+    this.ssh = ssh;
+    this.stream = stream;
+    this.hostKey = hostKey || null;
+    this.ready = true;
+    this.updatedAt = nowIso();
+    this.sendReady();
+  }
+
+  sendReady() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    sendTerminalJson(this.ws, {
+      type: 'ready',
+      version: 1,
+      sessionId: this.id,
+      targetId: this.targetId,
+      targetKind: this.publicTarget?.kind || this.kind,
+      hostKey: this.hostKey || undefined,
+      capabilities: {
+        binaryData: true,
+        resize: true,
+        resume: true,
+        replay: true
+      }
+    });
+  }
+
+  accept(data) {
+    if (this.closed) return;
+    const buffer = Buffer.from(data);
+    this.backlog.push(buffer);
+    this.backlogBytes += buffer.length;
+    while (this.backlogBytes > MOBILE_TERMINAL_REPLAY_LIMIT_BYTES && this.backlog.length > 0) {
+      this.backlogBytes -= this.backlog.shift().length;
+    }
+    this.updatedAt = nowIso();
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      sendTerminalData(this.ws, true, buffer);
+    }
+  }
+
+  replayBacklog() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    for (const buffer of this.backlog) {
+      sendTerminalData(this.ws, true, buffer);
+    }
+  }
+
+  write(data) {
+    if (this.closed || !this.stream) return;
+    this.stream.write(Buffer.from(data));
+    this.updatedAt = nowIso();
+  }
+
+  resize(size) {
+    this.size = size;
+    this.updatedAt = nowIso();
+    if (this.stream) {
+      this.stream.setWindow(size.rows, size.cols, 0, 0);
+    }
+  }
+
+  detach(ws) {
+    if (this.ws !== ws) return;
+    this.ws = null;
+    this.attached = false;
+    this.detachedAt = Date.now();
+    this.updatedAt = nowIso();
+  }
+
+  remoteClosed() {
+    if (this.closed) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      sendTerminalJson(this.ws, { type: 'closed', version: 1, sessionId: this.id });
+      this.ws.close(1000, 'ssh closed');
+    }
+    this.close(1000, 'ssh closed');
+  }
+
+  close(code = 1000, reason = 'session closed') {
+    if (this.closed) return;
+    this.closed = true;
+    this.closedAt = nowIso();
+    mobileTerminalSessions.delete(this.id);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      sendTerminalJson(this.ws, { type: 'closed', version: 1, sessionId: this.id });
+      this.ws.close(code, reason);
+    }
+    if (this.stream) {
+      this.stream.end();
+    }
+    if (this.ssh) {
+      this.ssh.end();
+    }
+    this.ws = null;
+    this.stream = null;
+    this.ssh = null;
+  }
+}
+
 function rejectUpgrade(req, socket, statusCode, message, userId = null, details = {}) {
   audit({
     userId,
@@ -1115,16 +1386,37 @@ function hostKeyErrorMessage(code) {
   return '';
 }
 
-function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = false }) {
+function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = false, resumeSessionId = '' }) {
   let ssh = null;
   let stream = null;
   let connected = false;
   let closing = false;
+  let managedMobileSession = null;
   let size = { cols: 100, rows: 30 };
   let lastTerminalActivityAt = Date.now();
   let lastSessionRenewedAt = 0;
 
+  if (mobile && resumeSessionId) {
+    managedMobileSession = mobileTerminalSessions.get(resumeSessionId) || null;
+    if (!managedMobileSession || !canUseMobileManagedTerminal(managedMobileSession, auth)) {
+      sendTerminalJson(ws, {
+        type: 'error',
+        version: 1,
+        code: 'session_expired',
+        message: 'Mobile terminal session is unavailable.'
+      });
+      ws.close(4004, 'mobile terminal session unavailable');
+      return;
+    }
+    connected = true;
+    size = managedMobileSession.size;
+    managedMobileSession.attach(ws);
+  }
+
   const canUseCurrentTerminal = () => {
+    if (managedMobileSession) {
+      return canUseMobileManagedTerminal(managedMobileSession, auth);
+    }
     if (mobile) {
       return kind === 'private'
         ? privateRelay.canUseMobileTerminal(auth.user.id, ticket.access_link_id, target.id, auth.session.id)
@@ -1141,6 +1433,10 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = fa
     clearInterval(idleTimer);
     if (message && ws.readyState === WebSocket.OPEN) {
       sendTerminalJson(ws, { type: 'error', message });
+    }
+    if (managedMobileSession) {
+      managedMobileSession.close(code, reason);
+      return true;
     }
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
       ws.close(code, reason);
@@ -1209,7 +1505,11 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = fa
         return;
       }
       recordTerminalActivity();
-      if (stream) stream.write(Buffer.from(raw));
+      if (managedMobileSession) {
+        managedMobileSession.write(raw);
+      } else if (stream) {
+        stream.write(Buffer.from(raw));
+      }
       return;
     }
 
@@ -1229,7 +1529,11 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = fa
     if (message.type === 'resize') {
       recordTerminalActivity();
       size = normalizeTerminalSize(message);
-      if (stream) stream.setWindow(size.rows, size.cols, 0, 0);
+      if (managedMobileSession) {
+        managedMobileSession.resize(size);
+      } else if (stream) {
+        stream.setWindow(size.rows, size.cols, 0, 0);
+      }
       return;
     }
 
@@ -1261,6 +1565,17 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = fa
               ws.close(1011, 'private terminal init failed');
             }
           });
+      } else if (mobile) {
+        managedMobileSession = startManagedMobileSshSession(
+          ws,
+          req,
+          auth,
+          ticket,
+          target,
+          message.auth || {},
+          size,
+          recordTerminalActivity
+        );
       } else {
         startSshSession(
           ws,
@@ -1286,6 +1601,10 @@ function handleTerminalSocket(ws, req, { auth, kind, ticket, target, mobile = fa
   ws.on('close', () => {
     closing = true;
     clearInterval(idleTimer);
+    if (managedMobileSession) {
+      managedMobileSession.detach(ws);
+      return;
+    }
     if (stream) stream.end();
     if (ssh) ssh.end();
     audit({
@@ -1402,6 +1721,132 @@ function startSshSession(ws, req, auth, target, sshAuth, size, assignSession, re
     });
 
   client.connect(connectConfig);
+}
+
+function startManagedMobileSshSession(ws, req, auth, ticket, target, sshAuth, size, recordActivity = () => {}) {
+  const client = new SshClient();
+  const hostKeyState = {};
+  const authMethod = sshAuth.method === 'privateKey' ? 'privateKey' : 'password';
+  const managedSession = new MobileManagedTerminalSession({
+    auth,
+    target,
+    publicTarget: publicTarget(target),
+    ticket,
+    size,
+    req
+  });
+
+  if (!parseAllowedAuthMethods(target.allowed_auth_methods).includes(authMethod)) {
+    sendTerminalJson(ws, {
+      type: 'error',
+      version: 1,
+      code: 'auth_method_not_allowed',
+      message: 'SSH authentication method is not allowed for this target.'
+    });
+    ws.close(1008, 'auth method not allowed');
+    return managedSession;
+  }
+
+  mobileTerminalSessions.set(managedSession.id, managedSession);
+  managedSession.attach(ws);
+
+  const connectConfig = {
+    host: target.host,
+    port: target.port,
+    username: target.ssh_username,
+    readyTimeout: 20000,
+    keepaliveInterval: 15000,
+    keepaliveCountMax: 3,
+    hostVerifier: createHostKeyVerifier(target, hostKeyState)
+  };
+
+  if (sshAuth.method === 'privateKey') {
+    connectConfig.privateKey = String(sshAuth.privateKey || '');
+    if (sshAuth.passphrase) connectConfig.passphrase = String(sshAuth.passphrase);
+  } else {
+    connectConfig.password = String(sshAuth.password || '');
+  }
+
+  client
+    .on('ready', () => {
+      recordActivity();
+      audit({
+        userId: auth.user.id,
+        type: 'mobile_ssh_connected',
+        details: { targetId: target.id, sessionId: managedSession.id },
+        req
+      });
+      client.shell(
+        {
+          term: target.default_term || 'xterm-256color',
+          cols: size.cols,
+          rows: size.rows
+        },
+        (error, shellStream) => {
+          if (error) {
+            sendTerminalJson(ws, {
+              type: 'error',
+              version: 1,
+              code: 'ssh_shell_failed',
+              message: 'SSH shell could not be opened.'
+            });
+            ws.close(1011, 'ssh shell failed');
+            managedSession.close(1011, 'ssh shell failed');
+            return;
+          }
+          managedSession.markReady({
+            ssh: client,
+            stream: shellStream,
+            hostKey: {
+              type: hostKeyState.keyType || target.host_key_type || '',
+              fingerprintSha256: hostKeyState.fingerprint || '',
+              verified: Boolean(hostKeyState.verified)
+            }
+          });
+          shellStream.on('data', (data) => {
+            recordActivity();
+            managedSession.accept(data);
+          });
+          shellStream.stderr.on('data', (data) => {
+            recordActivity();
+            managedSession.accept(data);
+          });
+          shellStream.on('close', () => {
+            managedSession.remoteClosed();
+          });
+        }
+      );
+    })
+    .on('error', (error) => {
+      audit({
+        userId: auth.user.id,
+        type: 'mobile_ssh_connect_failed',
+        details: { targetId: target.id, sessionId: managedSession.id, code: error.code },
+        req
+      });
+      if (ws.readyState === WebSocket.OPEN) {
+        sendTerminalJson(ws, {
+          type: 'error',
+          version: 1,
+          code: hostKeyState.errorCode || 'ssh_failed',
+          message: hostKeyErrorMessage(hostKeyState.errorCode) ||
+            'SSH connection failed. Check the target host and credentials.'
+        });
+        ws.close(1011, 'ssh failed');
+      }
+      managedSession.close(1011, 'ssh failed');
+    })
+    .on('close', () => {
+      audit({
+        userId: auth.user.id,
+        type: 'mobile_ssh_disconnected',
+        details: { targetId: target.id, sessionId: managedSession.id },
+        req
+      });
+    });
+
+  client.connect(connectConfig);
+  return managedSession;
 }
 
 function normalizeTerminalSize(message) {
